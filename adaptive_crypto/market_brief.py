@@ -1,5 +1,6 @@
-"""One independent 15-minute research worker; never accesses trading records."""
+"""Independent 15-minute AI market commentary; never accesses trading records."""
 import copy
+import hashlib
 import json
 import math
 import threading
@@ -7,8 +8,9 @@ import time
 from pathlib import Path
 
 from .core import H4, DataError, utc
-from .ledger import atomic_json
+from .storage import atomic_json
 from .market_brief_provider import grounded_brief
+from .ai_prompts import effective_prompt
 
 INTERVAL_MS = 15*60*1000
 
@@ -27,9 +29,18 @@ def market_context(runtime, now):
         stamp, price = quote.get("asof_ms", 0), quote.get("last")
         if not isinstance(stamp, (int, float)) or not -2000 <= now-stamp <= 45000:
             continue
+        price_reference = "last trade"
         if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
-            continue
-        row = {"asset": name, "pair": cfg["symbol"], "price": price, "quote_at_utc": utc(stamp)}
+            # Trading validates and retains bid/ask while discarding last-trade
+            # fields. Use a labelled public midpoint for commentary only.
+            bid, ask = quote.get("bid"), quote.get("ask")
+            if (not isinstance(bid, (int, float)) or not isinstance(ask, (int, float))
+                    or not math.isfinite(bid) or not math.isfinite(ask) or not 0 < bid <= ask):
+                continue
+            price = bid/2+ask/2
+            price_reference = "current bid/ask midpoint"
+        row = {"asset": name, "pair": cfg["symbol"], "price": price, "quote_at_utc": utc(stamp),
+               "price_reference": price_reference}
         candles = charts.get(name, {}).get("candles", [])
         # Use six complete 4H bars when contiguous, explicitly labelled by time.
         if len(candles) >= 6:
@@ -71,7 +82,8 @@ class MarketBrief:
 
     @staticmethod
     def _selection(config):
-        return (config["provider"], config["model"], config["api_key"])
+        return (config["provider"], config["model"], config["api_key"],
+                hashlib.sha256(effective_prompt(config.get("prompt")).encode("utf-8")).hexdigest())
 
     def status(self):
         now = self.clock()
@@ -95,6 +107,7 @@ class MarketBrief:
                 state = "stale" if brief else "error"
             return {"state": state, "brief": brief, "error": error,
                     "provider": config["provider"], "model": config["model"], "refresh_seconds": 900,
+                    "research_mode": "web_search",
                     "next_update_ms": self.last_attempt+INTERVAL_MS if self.last_attempt else None,
                     "can_refresh": not self.busy and not self.requested and (not self.last_attempt or now-self.last_attempt >= 60000)}
 
@@ -128,7 +141,10 @@ class MarketBrief:
                 return False
             if selection != self.selection:
                 self.result, self.error = None, None
-                if self.selection is not None or self.persisted_profile != selection[:2]:
+                # Prompt edits invalidate old content, but do not spend again before
+                # the normal update or a deliberate Refresh summary request.
+                if (self.selection is not None and self.selection[:3] != selection[:3]
+                        or self.selection is None and self.persisted_profile != selection[:2]):
                     self.last_attempt = 0
                 self.selection = selection
             if not self.requested and self.last_attempt and now-self.last_attempt < INTERVAL_MS:
@@ -156,7 +172,7 @@ class MarketBrief:
                 self.error = str(exc)
         except Exception:
             with self.lock:
-                self.error = "Market summary unavailable. Check the AI connection and model search support in Settings."
+                self.error = "Market summary unavailable. Check the selected AI provider, model and connection in Settings."
         finally:
             with self.lock:
                 self.busy = False

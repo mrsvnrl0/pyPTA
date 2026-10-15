@@ -1,0 +1,4 @@
+# Preserve published model metadata and original Pine source bytes.
+/adaptive_crypto/models/parente_5_2.npz binary
+/adaptive_crypto/models/parente_5_2.json -text
+/scripts/pine/smc_structure_engine_emparchitect.pine -text

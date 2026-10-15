@@ -1,7 +1,8 @@
-"""Create a deterministic, allowlisted source archive without reading runtime data.
+"""Create a deterministic, allowlisted source archive without runtime data.
 
-Uses only the standard library. The working tree is the source of truth: Git's
-index is neither read nor changed. ZIP_STORED avoids compression-library drift.
+The maintainable archive contains the application and original Parente 5/2
+artifacts. The working tree is authoritative; Git's index is neither read nor
+changed. ZIP_STORED avoids compression-library drift.
 """
 from __future__ import annotations
 
@@ -9,7 +10,6 @@ import argparse
 import hashlib
 import io
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -17,71 +17,58 @@ import stat
 import tempfile
 import zipfile
 
-
 ROOT = Path(__file__).resolve().parents[1]
 FIXED_FILES = (
-    ".gitignore", "README.md", "adaptive_crypto_dashboard.py",
+    ".gitignore", ".gitattributes", "README.md", "adaptive_crypto_dashboard.py",
     "adaptive_crypto_settings.example.json", "requirements.txt",
-    "requirements-neural.txt", "requirements-runtime-lock.txt",
-    "requirements-candidate-training.txt", "requirements-candidate-runtime.txt",
-    "build_windows_installers.ps1", "start_dashboard.ps1",
-    "start_dashboard_background.ps1",
-    "adaptive_crypto/models/NOTICE.md",
-    "adaptive_crypto/models/parente_5_2.json",
+    "requirements-neural.txt", "requirements-runtime-lock.txt", "requirements-linux.txt",
+    "build_windows_installers.ps1", "start_dashboard.ps1", "start_dashboard_background.ps1",
+    "adaptive_crypto/models/NOTICE.md", "adaptive_crypto/models/parente_5_2.json",
     "adaptive_crypto/models/parente_5_2.npz",
-    "docs/HISTORICAL_DASHBOARD.md", "docs/NEURAL_STRATEGY.md",
-    "docs/PERSISTENCE_SQLITE_PLAN.md", "docs/SQLITE_PERSISTENCE.md",
-    "docs/RELEASE_BASELINE.md", "docs/NN_CANDIDATE_EVALUATION.md",
-    "gex_target_audit/FORMULA.md",
-    "docs/GPT6_SOLAR_NN_CANDIDATES_HANDOFF.md",
-    "benchmarks/persistence_benchmark.py",
-    "test_data/btc_spike_20260911.json", "test_data/neural_author_btc.json",
+    "docs/NEURAL_STRATEGY.md", "docs/SQLITE_PERSISTENCE.md", "docs/RELEASE_BASELINE.md",
+    "docs/SMC_REACHABILITY.md", "docs/SMC_PRICE_GUIDE.md", "docs/perky_smc_port.md", "docs/DERIBIT_DATA.md",
+    "scripts/pine/perky_smc_ultimate_v5.pine",
+    "tests/__init__.py", "tests/neural_fixtures.py", "tests/ui_helpers.py", "tests/currency_fixtures.py",
+    "tests/data/neural_author_btc.json", "restart_dashboard.ps1", "deploy/pypta.service",
     "packaging/windows/dashboard.ico", "packaging/windows/desktop.py",
     "packaging/windows/installer.nsi", "packaging/windows/pyPTA.spec",
     "packaging/windows/requirements-lock.txt", "packaging/windows/self_test_btc.json",
     "packaging/windows/version.txt", "packaging/windows/windows_launcher.py",
-    "tools/source_release.py", "tools/prepare_windows_build.py",
-    "tools/audit_nn_candidate_activation.py",
-    "tools/backup_live_nn_candidate_activation.py",
-    "tools/benchmark_nn_candidate_runtime.py",
-    "tools/build_nn_candidate_ensemble.py",
-    "tools/candidate_train_pipeline.py",
-    "tools/compare_nn_candidate_reports.py",
-    "tools/derive_nn_comparison_experiment.py",
-    "tools/evaluate_nn_candidates.py",
-    "tools/package_nn_candidate_ensemble.py",
-    "tools/predict_parente_candidate_baseline.py",
-    "tools/preview_nn_model_selector.js",
-    "tools/train_nn_candidates.py",
-    "tools/train_nn_simple_baselines.py",
-    "tools/verify_nn_ensemble_runtime.py",
-    "tools/drl_environment.py", "tools/train_nn_drl.py", "tools/verify_nn_drl.py", "tools/publish_nn_drl.py",
-    "requirements-drl-training.txt", "docs/DRL_NN_ASSISTED.md",
-    "docs/LUNA_DRL_EASY_TASKS.md",
+    "tools/source_release.py", "tools/prepare_windows_build.py", 
 )
-# Deliberately narrow rules; new runtime files or research directories are not
-# included just because they are tracked by Git or sit beside application code.
-SOURCE_GLOBS = (
-    "adaptive_crypto/*.py", "adaptive_crypto/templates/*.html",
-    "adaptive_crypto/static/*.css", "adaptive_crypto/static/*.js",
-    "test_*.py", "test_*.js", "packaging/windows/licenses/*.txt",
+# Positive module/resource lists prevent extra source, private notes or removed
+# subsystems from returning through broad package-directory globbing.
+PACKAGE_MODULES = (
+    "__init__", "__main__", "administration", "ai_prompts", "ai_providers", "backups",
+    "binance_market_data", "binance_spot_data", "market_feed", "buy_watches", "cli", 
+    "connection_credentials", "connection_settings", "connections", "core", "currency_conversion", "deribit",
+    "deribit_settings", "deribit_market_data", "deribit_options", "dvol", "dvol_settings", "project_keys", "feed_diagnostics", "gex", "gex_currency", 
+    "gex_targets", "holding_targets", "linux_credentials",
+    "manual_paper", "market_brief", "market_brief_provider", "market_data", "neural",
+    "neural_engine", "neural_input_contract", "neural_ledger", "neural_models", "neural_tools",
+    "notifications", "paper_deletion", "persistence", "pine_alerts", "pine_guidance",
+    "smc_position_context", "smc_runtime", "position_alerts", "position_guidance",
+    "position_neural", "position_options", "positions", "restore", "runtime", "settings_editor",
+    "spot_correction", "state_codec", "state_lock", "state_tools", "state_paths", "storage", "perky_smc",
+    "take_profit_alerts", "trade_records", "web", "smc_reachability",
 )
+TEMPLATES = (
+    "reachability", "buy_watches", "connection_settings", "dashboard_title", "deribit_settings", "feed_status",
+    "dvol", "dvol_settings", "gex", "live_paper", "manual_paper_entry", "market_brief", "market_dashboard",
+    "market_price_guide", "navigation", "neural_dashboard", "page_footer", "page_header",
+    "paper_statistics", "paper_trade_table", "pine_chart", "pine_quality", "position_signals",
+    "positions_page", "restore_controls", "settings", "signal_lights", "strategy_controls",
+    "target_method", "target_selection", "trade_records",
+)
+STATIC_FILES = (
+    "reachability.js", "connection_settings.js", "dashboard.css", "dashboard.js", "deribit_settings.js",
+    "dvol.js", "dvol_settings.js", "dvol.css", "feed_status.css", "feed_status.js", "gex.js", "live_refresh.js", "market_brief.css",
+    "market_brief.js", "pine_chart.css", "pine_chart.js", "positions.js", "restore.js", "settings.js",
+)
+SOURCE_GLOBS = ("tests/test_*.py", "packaging/windows/licenses/*.txt")
 MANIFEST_NAME = "SOURCE_MANIFEST.json"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
-CANDIDATE_FAMILIES = frozenset((
-    "lstm_classifier_v1", "gru_classifier_v1", "cnn_lstm_classifier_v1",
-    "grouped_attention_lstm_v1", "probability_ensemble_v1",
-))
-CANDIDATE_COMPONENT_ORDER = (
-    "lstm_classifier_v1", "gru_classifier_v1", "cnn_lstm_classifier_v1",
-    "grouped_attention_lstm_v1",
-)
-CANDIDATE_VERSION = re.compile(r"[0-9a-f]{12}\Z")
-CANDIDATE_SCHEMA = "kraken-ohlcv-16-v1"
-CANDIDATE_LABEL = "parente-source-5-2-v1"
-CANDIDATE_MAX_MANIFEST = 250_000
-CANDIDATE_MAX_MODEL = 20_000_000
-CANDIDATE_MAX_REPORT = 5_000_000
+PARENTE_SHA256 = "8907c6f395dc8cf385619f1cace6e27c3b23a04a820fe980cde65898cad56c87"
 
 
 def _checked_file(root: Path, path: Path) -> Path:
@@ -99,259 +86,21 @@ def _checked_file(root: Path, path: Path) -> Path:
     return path
 
 
-def _checked_directory(root: Path, path: Path) -> None:
-    """Reject a reparse point before enumerating a candidate bundle directory."""
-    relative = path.relative_to(root)
-    current = root
-    for part in relative.parts:
-        current = current / part
-        info = current.lstat()
-        reparse = getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        if stat.S_ISLNK(info.st_mode) or reparse:
-            raise ValueError(f"Source links/reparse points are not allowed: {relative.as_posix()}")
-    if not path.is_dir():
-        raise ValueError(f"Candidate path is not a directory: {relative.as_posix()}")
-
-
-def _candidate_data(root: Path, path: Path, maximum: int) -> bytes:
-    file_path = _checked_file(root, path)
-    if file_path.stat().st_size > maximum:
-        raise ValueError(f"Candidate artifact exceeds size limit: {path.relative_to(root).as_posix()}")
-    return file_path.read_bytes()
-
-
-def _candidate_filename(value: object, extension: str) -> str:
-    if (type(value) is not str or not value.endswith(extension) or value in {".", ".."}
-            or Path(value).name != value or any(char in value for char in ("/", "\\", ":", "\x00"))):
-        raise ValueError("Candidate manifest references an invalid filename")
-    return value
-
-
-def _candidate_sha(value: object) -> bool:
-    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
-
-
-def candidate_artifact_paths(root: Path) -> set[Path]:
-    """Select only immutable, hash-checked ONNX bundles; never scan their extras.
-
-    Source assembly deliberately uses the standard library. Runtime ONNX tensor
-    validation is a separate release check, performed by the candidate loader.
-    """
-    root = Path(root).resolve(strict=True)
-    candidate_root = root / "adaptive_crypto" / "models" / "candidates"
-    if not candidate_root.exists() and not candidate_root.is_symlink():
-        return set()
-    _checked_directory(root, candidate_root)
-    paths: set[Path] = set()
-    validated: dict[tuple[str, str], tuple[dict, str]] = {}
-    # The ensemble refers to the four previously validated single-network
-    # bundles by immutable manifest hash; process it after those bundles.
-    family_order = (*sorted(CANDIDATE_FAMILIES - {"probability_ensemble_v1"}),
-                    "probability_ensemble_v1")
-    for family in family_order:
-        family_path = candidate_root / family
-        if not family_path.exists() and not family_path.is_symlink():
-            continue
-        _checked_directory(root, family_path)
-        for bundle in sorted(family_path.iterdir()):
-            if not CANDIDATE_VERSION.fullmatch(bundle.name):
-                continue
-            _checked_directory(root, bundle)
-            manifest_path = bundle / "manifest.json"
-            raw = _candidate_data(root, manifest_path, CANDIDATE_MAX_MANIFEST)
-            try:
-                manifest = json.loads(raw)
-                if not isinstance(manifest, dict) or manifest.get("schema") != 1 or manifest.get("id") != family:
-                    raise ValueError("Candidate manifest architecture or schema mismatch")
-                identity = manifest.get("artifact_id")
-                # Validation reports contain the artifact ID, so the ID covers
-                # the frozen model declaration while report bytes get their
-                # own SHA256 in the final manifest.
-                operational = (manifest.get("identity_payload") if family == "probability_ensemble_v1"
-                               else {key: value for key, value in manifest.items()
-                                     if key not in {"artifact_id", "report", "report_sha256"}})
-                canonical = json.dumps(operational,
-                                       sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-                if (not _candidate_sha(identity) or not identity.startswith(bundle.name)
-                        or hashlib.sha256(canonical).hexdigest() != identity):
-                    raise ValueError("Candidate manifest artifact identity mismatch")
-                if (manifest.get("feature_schema") != CANDIDATE_SCHEMA
-                        or manifest.get("classes") != ["BUY", "HOLD", "SELL"]
-                        or manifest.get("input_shape") != [1, 64, 16]
-                        or manifest.get("output_shape") != [1, 3]
-                        or manifest.get("timeframe_ms") != 14_400_000
-                        or manifest.get("history_bars") != 319
-                        or manifest.get("target_horizon_bars") != 2
-                        or manifest.get("label_version") != CANDIDATE_LABEL):
-                    raise ValueError("Candidate feature or target contract mismatch")
-                names = manifest.get("feature_names")
-                if (not isinstance(names, list) or len(names) != 16 or len(set(names)) != 16
-                        or any(type(name) is not str or not name for name in names)):
-                    raise ValueError("Candidate feature names are missing")
-                cutoff = manifest.get("latest_model_selection_through_ms")
-                if type(cutoff) is not int or cutoff < 0:
-                    raise ValueError("Candidate cutoff is missing")
-                if family == "probability_ensemble_v1":
-                    components = manifest.get("components")
-                    coverage = manifest.get("coverage")
-                    weights = manifest.get("weights")
-                    if (not isinstance(components, list) or len(components) != 4
-                            or not isinstance(weights, list) or weights != [.25] * 4
-                            or not isinstance(coverage, list) or not coverage
-                            or coverage != sorted(set(coverage))
-                            or any(type(asset) is not str or not asset.isalnum() or asset != asset.upper()
-                                   for asset in coverage)):
-                        raise ValueError("Candidate fixed ensemble contract is invalid")
-                    supported = None
-                    for component_family, component in zip(CANDIDATE_COMPONENT_ORDER, components):
-                        if not isinstance(component, dict) or set(component) != {"model_id", "artifact_id", "manifest_sha256"}:
-                            raise ValueError("Candidate ensemble component is invalid")
-                        component_id = component.get("model_id")
-                        if (type(component_id) is not str or not component_id.startswith(component_family + "@")
-                                or not _candidate_sha(component.get("artifact_id"))
-                                or not _candidate_sha(component.get("manifest_sha256"))):
-                            raise ValueError("Candidate ensemble component identity is invalid")
-                        prefix = component_id.split("@", 1)[1]
-                        record = validated.get((component_family, prefix))
-                        if (record is None or record[0]["artifact_id"] != component["artifact_id"]
-                                or record[1] != component["manifest_sha256"]):
-                            raise ValueError("Candidate ensemble references an unvalidated or changed component")
-                        if record[0]["latest_model_selection_through_ms"] > cutoff:
-                            raise ValueError("Candidate ensemble cutoff precedes a component")
-                        asset_set = set(record[0]["members"])
-                        supported = asset_set if supported is None else supported & asset_set
-                    if set(coverage) != supported:
-                        raise ValueError("Candidate ensemble coverage differs from its components")
-                    expected_payload = {
-                        "schema": "fixed-probability-ensemble-v1", "architecture_id": family,
-                        "feature_schema": CANDIDATE_SCHEMA, "label_version": CANDIDATE_LABEL,
-                        "timeframe_ms": 14_400_000, "target_horizon_bars": 2,
-                        "history_bars": 319, "classes": ["BUY", "HOLD", "SELL"],
-                        "weights": [.25] * 4, "components": components, "coverage": coverage,
-                        "latest_model_selection_through_ms": cutoff,
-                    }
-                    if manifest.get("identity_payload") != expected_payload:
-                        raise ValueError("Candidate ensemble identity payload is invalid")
-                else:
-                    members = manifest.get("members")
-                    if not isinstance(members, dict) or not members:
-                        raise ValueError("Candidate trained assets are missing")
-                    filenames = set()
-                    for asset, member in members.items():
-                        if type(asset) is not str or not asset.isalnum() or asset != asset.upper() or not isinstance(member, dict):
-                            raise ValueError("Candidate asset metadata is invalid")
-                        filename = _candidate_filename(member.get("onnx"), ".onnx")
-                        if filename in filenames or not _candidate_sha(member.get("sha256")):
-                            raise ValueError("Candidate ONNX filename or hash is invalid")
-                        filenames.add(filename)
-                        for key, positive in (("mean", False), ("scale", True)):
-                            values = member.get(key)
-                            if (not isinstance(values, list) or len(values) != 16
-                                    or any(type(value) not in (int, float) or not math.isfinite(value)
-                                           or positive and value <= 0 for value in values)):
-                                raise ValueError(f"Candidate {key} is invalid")
-                        trained = member.get("trained_through_ms")
-                        if (type(trained) is not int or trained < 0 or trained > cutoff
-                                or not _candidate_sha(member.get("dataset_sha256"))):
-                            raise ValueError("Candidate training provenance is invalid")
-                        model_path = bundle / filename
-                        if hashlib.sha256(_candidate_data(root, model_path, CANDIDATE_MAX_MODEL)).hexdigest() != member["sha256"]:
-                            raise ValueError(f"Candidate {asset} ONNX hash mismatch")
-                        paths.add(model_path)
-                report_name = _candidate_filename(manifest.get("report"), ".json")
-                if report_name == "manifest.json" or not _candidate_sha(manifest.get("report_sha256")):
-                    raise ValueError("Candidate report metadata is invalid")
-                report_path = bundle / report_name
-                report_bytes = _candidate_data(root, report_path, CANDIDATE_MAX_REPORT)
-                if hashlib.sha256(report_bytes).hexdigest() != manifest["report_sha256"]:
-                    raise ValueError("Candidate report hash mismatch")
-                if not isinstance(json.loads(report_bytes), dict):
-                    raise ValueError("Candidate report must be a JSON object")
-            except (TypeError, OverflowError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError(f"Invalid candidate bundle {bundle.relative_to(root).as_posix()}: {exc}") from exc
-            paths.update((manifest_path, report_path))
-            validated[(family, bundle.name)] = manifest, hashlib.sha256(raw).hexdigest()
-    return paths
-
-
 def packaged_model_paths(root: Path) -> set[Path]:
-    """The only model files permitted in source archives or frozen builds."""
+    """Only the published Parente weights, metadata and license notice ship."""
     root = Path(root).resolve(strict=True)
     base = root / "adaptive_crypto" / "models"
-    candidates = candidate_artifact_paths(root)
-    return {base / name for name in ("NOTICE.md", "parente_5_2.json", "parente_5_2.npz")} | candidates | drl_artifact_paths(root, candidates)
-
-
-def drl_artifact_paths(root: Path, supervised_paths: set[Path]) -> set[Path]:
-    """Allowlist DRL data after its frozen supervised dependency was verified.
-
-    Uses only the standard library; full inference/evidence validation remains
-    a required runtime check. Never package training checkpoints or arbitrary
-    extra files inside a bundle.
-    """
-    family = 'drl_ppo_classifier_v1'
-    directory = root / 'adaptive_crypto/models/candidates' / family
-    if not directory.exists() and not directory.is_symlink():
-        return set()
-    _checked_directory(root, directory)
-    result = set()
-    for bundle in sorted(directory.iterdir()):
-        if not CANDIDATE_VERSION.fullmatch(bundle.name):
-            continue
-        _checked_directory(root, bundle)
-        raw = _candidate_data(root, bundle / 'manifest.json', CANDIDATE_MAX_MANIFEST)
-        m = json.loads(raw)
-        operational = {k: v for k, v in m.items() if k not in ('artifact_id', 'report', 'report_sha256')}
-        digest = hashlib.sha256(json.dumps(operational, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
-        if (m.get('schema') != 'nn-assisted-drl-v1' or m.get('id') != family
-                or digest != m.get('artifact_id') or not digest.startswith(bundle.name)
-                or m.get('classes') != ['BUY', 'HOLD', 'SELL'] or m.get('input_shape') != [1, 19]
-                or m.get('output_shape') != [1, 3] or m.get('history_bars') != 319
-                or m.get('feature_schema') != CANDIDATE_SCHEMA
-                or m.get('output_semantics') != 'policy_action_probabilities'
-                or m.get('evidence_kind') != 'retrospective_research'
-                or m.get('recommendation') != 'no demonstrated winner'):
-            raise ValueError('Invalid DRL source bundle contract')
-        base_family, separator, version = m['base_model']['model_id'].partition('@')
-        if not separator or base_family not in CANDIDATE_COMPONENT_ORDER or not CANDIDATE_VERSION.fullmatch(version):
-            raise ValueError('Invalid DRL supervised dependency')
-        base_path = directory.parent / base_family / version / 'manifest.json'
-        if base_path not in supervised_paths or hashlib.sha256(base_path.read_bytes()).hexdigest() != m['base_model']['manifest_sha256']:
-            raise ValueError('Unverified DRL supervised dependency')
-        base = json.loads(base_path.read_bytes())
-        if not m.get('members') or not set(m['members']).issubset(base['members']):
-            raise ValueError('Invalid DRL coverage')
-        names = set()
-        for asset, member in m['members'].items():
-            name = _candidate_filename(member.get('onnx'), '.onnx')
-            if name in names or not _candidate_sha(member.get('sha256')):
-                raise ValueError('Invalid DRL member file')
-            names.add(name)
-            for key in ('mean', 'scale'):
-                values = member.get(key)
-                if (not isinstance(values, list) or len(values) != 16
-                        or any(type(v) not in (int, float) or not math.isfinite(v) or key == 'scale' and v <= 0 for v in values)):
-                    raise ValueError('Invalid DRL scaler')
-            path = bundle / name
-            if hashlib.sha256(_candidate_data(root, path, CANDIDATE_MAX_MODEL)).hexdigest() != member['sha256']:
-                raise ValueError('DRL member hash mismatch')
-            result.add(path)
-        report = bundle / _candidate_filename(m.get('report'), '.json')
-        if report.name == 'manifest.json' or hashlib.sha256(_candidate_data(root, report, CANDIDATE_MAX_REPORT)).hexdigest() != m.get('report_sha256'):
-            raise ValueError('DRL report hash mismatch')
-        evidence = json.loads(report.read_bytes())
-        if (evidence.get('artifact_id') != digest or evidence.get('technical_status') != 'trained_export_parity_passed'
-                or evidence.get('evidence_kind') != 'retrospective_research'
-                or evidence.get('recommendation') != 'no demonstrated winner'):
-            raise ValueError('Invalid DRL source report')
-        result.update((bundle / 'manifest.json', report))
-    return result
+    return {base / name for name in ("NOTICE.md", "parente_5_2.json", "parente_5_2.npz")}
 
 
 def collect_sources(root: Path) -> dict[str, bytes]:
-    """Read only explicitly permitted sources, failing on missing required files."""
+    """Read permitted sources and verify the unchanged published Parente model."""
     root = Path(root).resolve(strict=True)
     paths = {root / name for name in FIXED_FILES}
+    optional = [*("adaptive_crypto/"+name+".py" for name in PACKAGE_MODULES),
+                *("adaptive_crypto/templates/"+name+".html" for name in TEMPLATES),
+                *("adaptive_crypto/static/"+name for name in STATIC_FILES)]
+    paths.update(root / name for name in optional if (root / name).exists() or (root / name).is_symlink())
     for pattern in SOURCE_GLOBS:
         paths.update(root.glob(pattern))
     paths.update(packaged_model_paths(root))
@@ -359,7 +108,9 @@ def collect_sources(root: Path) -> dict[str, bytes]:
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         name = path.relative_to(root).as_posix()
         sources[name] = _checked_file(root, path).read_bytes()
-    if not any(name.startswith("test_") and name.endswith(".py") for name in sources):
+    if hashlib.sha256(sources["adaptive_crypto/models/parente_5_2.npz"]).hexdigest() != PARENTE_SHA256:
+        raise ValueError("Published Parente 5/2 model hash mismatch")
+    if not any(name.startswith("tests/test_") and name.endswith(".py") for name in sources):
         raise ValueError("Source baseline requires its Python regression tests")
     return sources
 

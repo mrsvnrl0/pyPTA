@@ -22,8 +22,7 @@ class StatePaths:
 
     @property
     def sources(self):
-        return {"legacy": self.base, "smc": self.base.with_suffix(".smc.json"),
-                "neural": self.base.with_suffix(".neural.json"),
+        return {"neural": self.base.with_suffix(".neural.json"),
                 "positions": self.base.with_suffix(".positions.json")}
 
     def select(self, requested):
@@ -35,7 +34,7 @@ class StatePaths:
             return "sqlite"
         has_json = any(path.exists() for path in self.sources.values())
         if requested == "sqlite" and has_json:
-            raise DataError("JSON state exists; first run python -m adaptive_crypto.state_migration import")
+            raise DataError("JSON state exists; first run python -m adaptive_crypto.state_tools import")
         return ("json" if has_json else "sqlite") if requested == "auto" else requested
 
 
@@ -51,24 +50,15 @@ def state_owner(paths):
 def validate_documents(documents, contexts):
     """Validate saved state against its saved configuration, without recovery."""
     from .core import Rules
-    from .ledger import validate_state, upgrade_state
-    from .smc_ledger import validate as validate_smc
     from .positions import validate_positions
+    from .neural_ledger import validate as validate_neural
     try:
         for name, document in documents.items():
-            if name == "legacy":
-                context = contexts[name]
-                rules = Rules(**context["rules"]).validate()
-                validate_state(upgrade_state(document, context["assets"], rules), context["assets"], rules)
-            elif name == "smc":
-                Rules(**contexts[name]["rules"]).validate()
-                validate_smc(document)
-            elif name == "positions":
-                validate_positions(document)
-            elif name == "neural":
-                from .neural_ledger import validate as validate_neural
+            if name == "neural":
                 Rules(**contexts[name]["rules"]).validate()
                 validate_neural(document)
+            elif name == "positions":
+                validate_positions(document)
             else:
                 raise DataError(f"Unknown state namespace: {name}")
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -77,33 +67,29 @@ def validate_documents(documents, contexts):
 
 @contextmanager
 def open_stores(base, assets, rules, backend="auto", *, settings_path=None):
-    from .ledger import StateStore, prepare_state
-    from .smc_ledger import SMCStore, prepare_smc
     from .positions import PositionStore, prepare_positions
     from dataclasses import asdict
     from .persistence import SQLiteDatabase
-    paths = StatePaths(base)
     from .neural_ledger import NeuralStore, prepare_neural
-    name = rules.paper_namespace
-    cls = {"smc": SMCStore, "neural": NeuralStore, "legacy": StateStore}[name]
-    prepare = {"smc": prepare_smc, "neural": prepare_neural, "legacy": prepare_state}[name]
+    paths = StatePaths(base)
     from .backups import backup_scope
     with state_owner(paths), backup_scope(base, settings_path), ExitStack() as stack:
         selected = paths.select(backend)
         db = None
         if selected == "sqlite":
             if not paths.database.exists():
-                prepared, _ = prepare(None, assets, rules)
+                prepared, _ = prepare_neural(None, assets, rules)
                 holdings, _ = prepare_positions(None, rules.market_mode)
-                _initialize_database(paths, {name: prepared, "positions": holdings},
-                                     {name: {"assets": assets, "rules": asdict(rules)}, "positions": {"market_mode": rules.market_mode}})
+                _initialize_database(paths, {"neural": prepared, "positions": holdings},
+                                     {"neural": {"assets": assets, "rules": asdict(rules)},
+                                      "positions": {"market_mode": rules.market_mode}})
             db = stack.enter_context(SQLiteDatabase(paths.database, owned=True))
             existing = db.documents()
             validate_documents(existing, db.information()["contexts"])
-            for namespace in (name, "positions"):
+            for namespace in ("neural", "positions"):
                 if namespace not in existing and paths.sources[namespace].exists():
                     raise DataError(f"Import the missing {namespace} namespace explicitly with matching settings")
-        paper = cls(paths.sources[name], assets, rules, backend=db.namespace(name) if db else None)
+        paper = NeuralStore(paths.sources["neural"], assets, rules, backend=db.namespace("neural") if db else None)
         positions = PositionStore(paths.sources["positions"], market_mode=rules.market_mode,
                                   backend=db.namespace("positions") if db else None)
         yield paper, positions

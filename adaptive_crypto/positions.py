@@ -6,39 +6,22 @@ import json
 import re
 import uuid
 
-from .core import M15, DataError, finite, normalise_pair, rvol, validate_candles
-from .ledger import atomic_json
+from .core import DataError, finite, normalise_pair
+from .storage import atomic_json
 from .persistence import DocumentStore
-from .strategy import momentum_indicators
-from .smc import structure_readings
-from .holding_targets import monitor_holding_targets, validate_holding_target
-from .position_alerts import momentum_alert, refresh_momentum_alerts
+from .holding_targets import validate_holding_target
 from .buy_watches import validate_buy_watches, create_buy_watch, cancel_buy_watch, monitor_buy_watches
 from .gex_targets import validate_target_mode
 from .position_options import POSITION_TYPES, validate_position_target, alerts_enabled, monitored_position
 
 
-def momentum_readings(candles, rules):
-    """Directional regime; entry-only gates do not suppress swings in a holding."""
-    if rules.strategy_model == "smc_video":
-        return structure_readings(candles, rules.smc_pivot_strength)
-    minimum = max(rules.momentum_roc_period+5*rules.momentum_signal_period,
-                  rules.momentum_rsi_period+2, rules.volume_period+1, rules.atr_period)
-    values = momentum_indicators(candles, rules)
-    readings = []
-    for i in range(minimum-1, len(candles)):
-        roc = values["roc"][i-rules.momentum_roc_period]
-        signal = values["signal"][i-rules.momentum_roc_period]
-        direction = "bullish" if roc > max(0, signal) else "bearish" if roc < min(0, signal) else "neutral"
-        bar = candles[i]
-        readings.append({"direction": direction, "bar_ms": bar.t, "end_ms": bar.end,
-                         "close": bar.c, "roc_percent": roc, "signal_percent": signal,
-                         "rsi": values["rsi"][i], "rvol": rvol(candles, i, rules.volume_period),
-                         "atr": values["atr"][i], "interval_ms": M15,
-                         "roc_period": rules.momentum_roc_period, "signal_period": rules.momentum_signal_period,
-                         "rsi_period": rules.momentum_rsi_period, "volume_period": rules.volume_period,
-                         "atr_period": rules.atr_period})
-    return readings
+
+
+def validate_monitored_pairs(document, assets):
+    """Pair edits must not attach existing records to a different price feed."""
+    for item in document.get("positions", []) + document.get("buy_watches", []):
+        if item.get("status") in {"open", "watching", "reached"} and assets.get(item["asset"], {}).get("symbol") != item["symbol"]:
+            raise DataError("Keep the recorded holding or watch pair enabled until it is closed or removed")
 
 
 def position_pnl(position, price):
@@ -49,10 +32,10 @@ def position_pnl(position, price):
 
 
 def validate_positions(document):
-    if not isinstance(document, dict) or document.get("version") != 1:
+    if not isinstance(document, dict) or document.get("version") != "pine-parente-positions-v1":
         raise DataError("Unsupported holdings file")
     json.dumps(document, allow_nan=False)
-    if not isinstance(document.get("positions"), list) or not isinstance(document.get("watches"), dict) or not isinstance(document.get("outbox"), list):
+    if not isinstance(document.get("positions"), list) or not isinstance(document.get("market_structure"), dict) or not isinstance(document.get("outbox"), list):
         raise DataError("Malformed holdings sections")
     buy_watch_ids = validate_buy_watches(document)
     preferences = document.get("paper_alert_preferences", {})
@@ -78,9 +61,11 @@ def validate_positions(document):
             raise DataError("Invalid position request identity")
         ids.add(p["id"])
         requests.add(p["request_id"])
-        if not isinstance(p.get("asset"), str) or not p["asset"].isalnum() or normalise_pair(p["symbol"]) != p["symbol"]:
+        if (not isinstance(p.get("asset"), str) or not p["asset"].isalnum()
+                or normalise_pair(p.get("symbol", "")) != p["symbol"]
+                or p["asset"] != p["symbol"].split("/")[0]):
             raise DataError("Invalid position asset")
-        if not p["symbol"].endswith("/USD") or p["side"] not in {"long", "short"} or p["status"] not in {"open", "closed"}:
+        if p["side"] not in {"long", "short"} or p["status"] not in {"open", "closed"}:
             raise DataError("Invalid position type")
         finite(p["entry"], "entry price", 1e-15)
         finite(p["quantity"], "quantity", 1e-15)
@@ -102,22 +87,6 @@ def validate_positions(document):
             raise DataError("Invalid independent position targets")
         for target in targets.values():
             validate_holding_target({**p, "take_profit": target})
-    for asset, watch in document["watches"].items():
-        if not isinstance(watch, dict) or not any(p["asset"] == asset and p["symbol"] == watch.get("symbol") and p["status"] == "open" for p in document["positions"]):
-            raise DataError("Momentum watch has no open holding")
-        if not re.fullmatch(r"[0-9a-f]{32}", watch.get("id", "")):
-            raise DataError("Invalid position watch identity")
-        for key in ("started_ms", "last_bar_ms"):
-            stamp = watch.get(key)
-            if not (key == "last_bar_ms" and stamp is None) and (type(stamp) is not int or stamp < 0):
-                raise DataError("Invalid position watch timestamp")
-        reading = watch.get("reading")
-        if reading is not None:
-            if reading["direction"] not in {"bullish", "bearish", "neutral"} or reading["bar_ms"] != watch["last_bar_ms"]:
-                raise DataError("Invalid momentum reading")
-            keys = ("close",) if reading.get("basis") == "structure" else ("close", "roc_percent", "signal_percent", "rsi", "atr")
-            for key in keys:
-                finite(reading[key], key)
     event_ids = set()
     for event in document["outbox"]:
         if not isinstance(event, dict) or event["id"] in event_ids or event["kind"] != "telegram":
@@ -135,7 +104,7 @@ def prepare_positions(source, market_mode="spot"):
     """Pure holding startup recovery, shared by JSON and SQLite."""
     if market_mode not in {"spot", "margin"}:
         raise DataError("Invalid holdings market mode")
-    data = {"version": 1, "positions": [], "watches": {}, "buy_watches": [], "outbox": []}
+    data = {"version": "pine-parente-positions-v1", "positions": [], "market_structure": {}, "buy_watches": [], "outbox": []}
     if source is not None:
         document = json.loads(source.decode("utf-8-sig"))
         validate_positions(document)  # Fail without overwriting damaged holdings.
@@ -146,10 +115,8 @@ def prepare_positions(source, market_mode="spot"):
                 event.update(retired=True, expires_ms=0)
                 if event["status"] == "queued":
                     event.update(status="cancelled", error="Short alerts disabled in spot mode; correct the recorded purchase first.")
-            if event.get("alert_type") in {"near_take_profit", "target_reached", "position_momentum", "position_structure", "position_neural", "position_stop", "buy_watch_hit", "buy_watch_momentum"} and event["status"] == "queued":
+            if event.get("alert_type") in {"near_take_profit", "target_reached", "position_momentum", "position_structure", "position_neural", "position_stop", "buy_watch_hit", "buy_watch_momentum", "pine_setup"} and event["status"] == "queued":
                 event.update(status="cancelled", error="Restarted: waiting for fresh position alert evidence.")
-            if event["status"] == "queued" and event.get("alert_type") is None:
-                event.update(status="cancelled", error="Legacy grouped alert retired; waiting for a new position-specific signal.")
             if event["status"] == "running":
                 event.update(status="uncertain", error="Process restarted during Telegram delivery; delivery is unknown.")
     validate_positions(data)
@@ -234,7 +201,7 @@ class PositionStore(DocumentStore):
                     if key in existing and existing[key] != value:
                         raise DataError("This form was already submitted with different options; reload before adding another position")
                 return existing, False
-            if asset in document["watches"] and document["watches"][asset]["symbol"] != symbol:
+            if any(p["asset"] == asset and p["symbol"] != symbol and p["status"] == "open" for p in document["positions"]):
                 raise DataError("Close the existing holding for this asset before changing its pair")
             position = {"id": uuid.uuid4().hex, "request_id": request_id, "asset": asset, "symbol": symbol,
                         "side": side, "entry": entry, "quantity": quantity, "status": "open", "target_mode": target_mode,
@@ -242,9 +209,6 @@ class PositionStore(DocumentStore):
                         "position_type": position_type, "nn_target_mode": nn_target_mode,
                         "momentum_alerts": momentum_alerts, "tp_alerts": tp_alerts, "stop_price": stop_price}
             document["positions"].append(position)
-            document["watches"].setdefault(asset, {"id": uuid.uuid4().hex, "symbol": symbol, "started_ms": now,
-                                                  "last_bar_ms": None, "reading": None, "rules_key": None,
-                                                  "error": "Waiting for the first completed momentum reading"})
             return position, True
         return self.transaction(save)
 
@@ -320,79 +284,10 @@ class PositionStore(DocumentStore):
             position_pnl(position, price)
             position.update(status="closed", close=price, closed_ms=now)
             open_ids = {p["id"] for p in document["positions"] if p["status"] == "open"}
-            if not any(p["asset"] == position["asset"] and p["status"] == "open" for p in document["positions"]):
-                document["watches"].pop(position["asset"], None)
             for event in document["outbox"]:
-                if event["status"] == "queued" and not open_ids.intersection(event["position_ids"]):
+                if event["status"] == "queued" and event.get("position_ids") and not open_ids.intersection(event["position_ids"]):
                     event.update(status="cancelled", error="The associated holdings were closed before delivery.")
             return position
         return self.transaction(close)
 
-    def monitor(self, asset, symbol, candles, rules, now, error=None, quote=None, notify=True):
-        if asset not in self.snapshot()["watches"]:
-            return
-        readings = []
-        structural = rules.strategy_model == "smc_video"
-        interval = rules.smc_entry_minutes*60000 if structural else M15
-        label = f"{interval//60000}M"
-        if error is None:
-            try:
-                validate_candles(candles, interval, now)
-                if candles[-1].t != (now//interval-1)*interval:
-                    raise DataError(f"Waiting for the latest completed {label} candle")
-                readings = momentum_readings(candles, rules)
-                if not readings:
-                    raise DataError(f"Waiting for sufficient {label} momentum history")
-            except (ValueError, TypeError) as exc:
-                error = str(exc)
-        rules_key = (f"smc-structure-v1:{interval}:{rules.smc_pivot_strength}" if structural else
-                     f"roc-signal-v1:{rules.momentum_roc_period}:{rules.momentum_signal_period}")
-        def update(document):
-            watch = document["watches"].get(asset)
-            if watch is None or watch["symbol"] != symbol:
-                return
-            watch["error"] = error
-            if error:
-                if notify:
-                    refresh_momentum_alerts(document, asset, symbol, watch, None, now, self.market_mode)
-                return
-            baseline_time = watch["started_ms"]
-            if watch["rules_key"] != rules_key:
-                # A changed formula establishes a new baseline, never a false swing.
-                baseline_time = now if watch.get("initialized") else watch["started_ms"]
-                watch.update(rules_key=rules_key, last_bar_ms=None, reading=None)
-            if watch["last_bar_ms"] is not None and readings[0]["bar_ms"] > watch["last_bar_ms"]+interval:
-                watch.update(last_bar_ms=None, reading=None)
-                baseline_time = now
-                watch["error"] = "History gap: the latest candle establishes a new baseline; intervening swings are unknown."
-            if watch["last_bar_ms"] is None:
-                baseline = next((r for r in reversed(readings) if r["end_ms"] <= baseline_time), readings[0])
-                watch.update(last_bar_ms=baseline["bar_ms"], reading=baseline, initialized=True)
-            for reading in readings:
-                if reading["bar_ms"] <= watch["last_bar_ms"]:
-                    continue
-                if structural and reading["event"] is None:
-                    # A rolling feed can lose the candle that set the regime.
-                    # Retain the saved break until a newly observed break replaces it.
-                    reading = copy.deepcopy(reading)
-                    for key in ("direction", "break_level", "break_ms"):
-                        reading[key] = watch["reading"][key]
-                previous = watch["reading"]["direction"]
-                positions = [p for p in document["positions"] if p["asset"] == asset and p["symbol"] == symbol
-                             and p["status"] == "open" and monitored_position(p, self.market_mode)
-                             and alerts_enabled(p, "position_momentum") and p.get("target_mode") != "nn"
-                             and max(p["opened_ms"], p.get("momentum_enabled_ms", 0), p.get("spot_correction", {}).get("corrected_ms", 0)) < reading["end_ms"]]
-                if notify and positions and reading["direction"] != previous and reading["direction"] in {"bullish", "bearish"}:
-                    for p in positions:
-                        event_id = f"holding:{watch['id']}:{p['id']}:{reading['bar_ms']}:{reading['direction']}"
-                        momentum_alert(document, p, reading, previous, quote, now, event_id, rules_key)
-                watch.update(last_bar_ms=reading["bar_ms"], reading=reading)
-            if notify:
-                refresh_momentum_alerts(document, asset, symbol, watch, quote, now, self.market_mode)
-        self.transaction(update)
 
-    def monitor_take_profit(self, asset, symbol, high, low, quote, rules, now, clock_error=None, gex_context=None):
-        if asset not in self.snapshot()["watches"]:
-            return
-        self.transaction(lambda document: monitor_holding_targets(
-            document, asset, symbol, high, low, quote, rules, now, clock_error, gex_context))

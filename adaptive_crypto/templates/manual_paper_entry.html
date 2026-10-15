@@ -1,0 +1,19 @@
+{% if s.is_neural %}
+{% set linked=namespace(position=none) %}
+{% for p in s.holdings.positions %}{% if p.id == request.args.get('paper_source') and p.status == 'open' and p.get('position_type','spot') == 'spot' and p.asset in assets %}{% set linked.position=p %}{% endif %}{% endfor %}
+<details class="records-section manual-paper-entry" id="manual-paper-entry" {{ 'open' if linked.position else '' }}>
+<summary><strong>+ Add a paper position</strong> · available cash {{ account_money(s.portfolio.cash) }}</summary>
+<p>Start a paper trade or invest unused paper cash. Choose a USD budget including the entry fee, or use available cash. Enter your own entry price, or leave it blank to use the current selected-pair price plus {{ num(s.rules.slippage_rate*100,2) }}% slippage.</p>
+{% if linked.position %}<p class="notice">Holding #{{ linked.position.id[:8] }} saved. Review this separate paper entry for {{ linked.position.asset }}. Enter its budget in USD; the recorded holding cost is in its own quote currency. You can enter the native paper entry price below. <a href="{{ url_for('positions_page') }}">Skip paper entry</a></p>{% endif %}
+<form class="position-form paper-entry-form" data-native-quote="{{ linked.position.symbol.split('/')[-1] if linked.position else (assets.values()|list)[0].symbol.split('/')[-1] }}" method="post" action="{{ url_for('open_manual_paper_position') }}" {{ 'data-dirty=1' if linked.position else '' }}>
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="request_id" value="{{ paper_request_id }}">
+{% if linked.position %}<input type="hidden" name="source_position_id" value="{{ linked.position.id }}"><input type="hidden" name="asset" value="{{ linked.position.asset }}"><p>Asset: <strong>{{ linked.position.asset }} · {{ linked.position.symbol }}</strong></p>
+{% else %}<label>Asset<select name="asset" required>{% for name,cfg in assets.items() %}<option value="{{ name }}" data-quote="{{ cfg.symbol.split('/')[-1] }}">{{ name }} · {{ cfg.symbol }}</option>{% endfor %}</select></label>{% endif %}
+<label>Paper funding<select name="budget_mode"><option value="amount">Up to a USD amount</option><option value="available">Use available cash</option></select></label>
+<label data-paper-budget>USD budget · includes entry fee<input type="number" name="budget_usd" min="0.01" step="any" required value=""></label>
+<label>Entry price · <span data-native-quote-label>{{ linked.position.symbol.split('/')[-1] if linked.position else (assets.values()|list)[0].symbol.split('/')[-1] }}</span> (optional)<input type="number" name="manual_price" min="0.000000000000001" step="any" placeholder="Blank = live price" aria-describedby="manual-paper-price-help"></label>
+<p class="muted" id="manual-paper-price-help">Your price is recorded exactly and the paper position opens immediately. Entry fees still apply; no entry slippage is added to your price. Quantity is calculated from the USD cash budget using a fresh conversion from USD to the selected pair’s quote currency. This does not place a pending order or backdate the trade.</p>
+<p class="muted">Manual entry · Parente-managed exit. A BUY signal is not required. Only a later completed 4H SELL can close this trade, within the normal execution window. {% if s.rules.nn_limitations %}Limitations are ON: the existing stop, cash, risk, allocation, spread, minimum-order and one-position-per-asset rules apply. The filled amount may be below your budget.{% else %}Limitations are OFF: no automatic stop; the fill can use all remaining cash after fees.{% endif %} Cash already invested is unavailable. This does not change any recorded holding.</p>
+<div class="form-actions"><button type="submit">Open paper position</button><button type="reset" class="secondary">Clear</button></div><p class="form-result" role="status"></p>
+</form></details>
+{% endif %}

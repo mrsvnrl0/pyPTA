@@ -66,11 +66,32 @@ function bindPositionForms() {
  document.querySelectorAll('.position-form').forEach(form => {
   if (boundPositionForms.has(form)) return;
   boundPositionForms.add(form);
+  const paperBudget = form.querySelector('[name="budget_mode"]');
+  const syncPaperBudget = () => {
+    if (!paperBudget) return;
+    const available = paperBudget.value === 'available';
+    const amount = form.querySelector('[name="budget_usd"]');
+    amount.disabled = available; amount.required = !available;
+    form.querySelector('[data-paper-budget]').hidden = available;
+  };
+  paperBudget?.addEventListener('change', syncPaperBudget);
+  syncPaperBudget();
+  const assetChoice = form.querySelector('select[name="asset"]');
+  const syncNativeQuote = () => {
+    const currency = assetChoice?.selectedOptions[0]?.dataset.quote || form.dataset.nativeQuote;
+    if (!currency) return;
+    form.dataset.nativeQuote = currency;
+    form.querySelectorAll('[data-native-quote-label]').forEach(label => { label.textContent = currency; });
+  };
+  assetChoice?.addEventListener('change', syncNativeQuote);
+  syncNativeQuote();
   form.addEventListener('input', () => { form.dataset.dirty = '1'; if (refreshHint) refreshHint.hidden = false; });
   form.addEventListener('change', () => { form.dataset.dirty = '1'; if (refreshHint) refreshHint.hidden = false; });
   form.addEventListener('reset', () => {
     form.dataset.dirty = '0'; form.querySelector('.form-result').textContent = '';
     if (refreshHint) refreshHint.hidden = !positionFormDirty();
+    // The reset event runs before the browser restores the select's default.
+    setTimeout(() => { syncPaperBudget(); syncNativeQuote(); }, 0);
   });
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -82,16 +103,34 @@ function bindPositionForms() {
       return;
     }
     const button = form.querySelector('button[type="submit"]');
-    form.dataset.saving = '1'; button.disabled = true; result.textContent = '';
+    const paperEntry = form.classList.contains('paper-entry-form');
+    const paperDelete = form.classList.contains('paper-delete-form');
+    if (paperDelete && positionFormDirty()) {
+      result.textContent = 'Save or clear your other edits before deleting this paper trade.';
+      return;
+    }
+    form.dataset.saving = '1'; button.disabled = true;
+    result.textContent = paperEntry ? 'Waiting for the current scan, then checking paper cash, NN coverage and a fresh quote…' : '';
     try {
+      if (paperDelete && !window.confirm('Delete paper trade ' + form.dataset.paperLabel + '?\n\nThis erases the paper record and reverses its effect on paper cash and realized P/L. Your actual holdings are unchanged.')) return;
       const response = await fetch(form.action, {method:'POST', body:new FormData(form),
-        headers:{Accept:'application/json'}, signal:AbortSignal.timeout(15000)});
+        headers:{Accept:'application/json'}, signal:AbortSignal.timeout(paperEntry ? 120000 : 15000)});
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || 'Unable to save this position.');
-      form.dataset.dirty = '0'; window.location.href = form.classList.contains('paper-alert-preferences') ? '/paper-trading' : body.position?.status === 'closed' ? '/trade-records#manual-trades' : '/positions';
+      if (!response.ok) throw new Error(body.error || (paperDelete ? 'Unable to delete this paper trade.' : 'Unable to save this position.'));
+      form.dataset.dirty = '0';
+      const destination = paperEntry || paperDelete || form.classList.contains('paper-alert-preferences') ? '/paper-trading#live-paper'
+        : body.position?.status === 'closed' ? '/trade-records#manual-trades'
+        : form.querySelector('[data-paper-followup]')?.checked && body.position?.position_type === 'spot'
+          ? '/paper-trading?paper_source=' + encodeURIComponent(body.position.id) + '#manual-paper-entry' : '/positions';
+      const next = new URL(destination, window.location.href);
+      if (next.pathname === window.location.pathname && next.search === window.location.search) {
+        window.location.hash = next.hash;
+        window.location.reload();
+      } else window.location.href = destination;
     } catch (error) {
       result.textContent = error.name === 'TimeoutError' || error.name === 'TypeError'
-        ? 'Save status is unknown. Retry this same form safely; duplicate submissions will not create another position.' : error.message;
+        ? paperDelete ? 'Delete status is unknown. Reload to check the ledger, or retry this deletion safely.'
+          : 'Save status is unknown. Retry this same form safely; duplicate submissions will not create another position.' : error.message;
     } finally { form.dataset.saving = '0'; button.disabled = false; }
   });
 });
@@ -152,17 +191,41 @@ function refreshAlertLabels() {
   });
   document.querySelectorAll('[data-market-expires]').forEach(panel => {
     if (Number(panel.dataset.marketExpires) <= Date.now()) {
+      panel.querySelectorAll('[data-qualified-action]').forEach(action => { action.hidden = true; action.removeAttribute('href'); });
       panel.querySelectorAll('[data-market-level]').forEach(level => { level.textContent = 'Pending fresh scan'; });
+      panel.querySelectorAll('[data-guide-status],[data-liquidity-status]').forEach(section => {
+        if (section.hasAttribute('data-guide-status')) section.dataset.guideStatus = 'unavailable';
+        if (section.hasAttribute('data-liquidity-status')) section.dataset.liquidityStatus = 'unavailable';
+      });
+      panel.querySelectorAll('[data-guide-message],[data-liquidity-message]').forEach(message => {
+        message.textContent = 'Waiting for a fresh scan.';
+      });
+      const blockers = panel.querySelector('[data-guide-blockers]');
+      if (blockers) blockers.hidden = true;
     }
   });
   document.querySelectorAll('[data-position-signal]').forEach(panel => {
+    const nnReading = panel.querySelector('[data-nn-reading]');
+    if (nnReading?.dataset.nnCurrent === '1' && Number(nnReading.dataset.nnExpires) <= Date.now()) {
+      nnReading.textContent = nnReading.textContent.replace('NN reading current', 'NN reading unavailable or stale');
+      nnReading.dataset.nnCurrent = '0';
+      const scores = panel.querySelector('[data-nn-current-details]');
+      if (scores) scores.hidden = true;
+    }
     if (Number(panel.dataset.signalExpires) > Date.now()) return;
     const selected = panel.querySelector('.signal-light.is-selected');
-    if (!selected) return;
-    selected.classList.remove('is-selected');
-    selected.setAttribute('aria-pressed', 'false');
-    selected.querySelector('.signal-selection').textContent = 'Inactive';
-    panel.querySelector('[data-position-action]').textContent = 'WAITING FOR FRESH READING';
+    const reason = panel.querySelector('[data-position-reason]');
+    const context = panel.querySelector('[data-position-current]');
+    if (!selected && !reason && !context) return;
+    if (selected) {
+      selected.classList.remove('is-selected');
+      selected.setAttribute('aria-pressed', 'false');
+      selected.querySelector('.signal-selection').textContent = 'Inactive';
+    }
+    const action = panel.querySelector('[data-position-action]');
+    if (action) action.textContent = 'WAITING FOR FRESH READING';
+    if (reason) reason.textContent = 'Waiting for fresh guidance and a current quote.';
+    if (context) context.hidden = true;
   });
   document.querySelectorAll('[data-alert-current="1"]').forEach(label => {
     if (Number(label.dataset.alertExpires) <= Date.now()) {
@@ -228,8 +291,8 @@ function updateLivePrice(element, data) {
   if (data && !data.stale && bar?.current && Number.isFinite(bar.c) && bar.c > 0 &&
       Number.isFinite(stamp) && stamp >= Number(display.dataset.asof || 0) &&
       Date.now() - stamp >= -2000 && Date.now() - stamp <= 45000) {
-    display.querySelector('[data-price-value]').textContent = '$' + bar.c.toLocaleString('en-US', {
-      minimumFractionDigits:Number(element.dataset.digits), maximumFractionDigits:Number(element.dataset.digits)});
+    display.querySelector('[data-price-value]').textContent = bar.c.toLocaleString('en-US', {
+      minimumFractionDigits:Number(element.dataset.digits), maximumFractionDigits:Number(element.dataset.digits)}) + ' ' + (data.symbol?.split('/')?.at(-1) || element.dataset.quoteCurrency || 'USDC');
     display.dataset.asof = String(stamp);
   }
   const asof = Number(display.dataset.asof);
@@ -237,7 +300,9 @@ function updateLivePrice(element, data) {
   const fresh = known && Date.now() - asof >= -2000 && Date.now() - asof <= 45000;
   display.classList.toggle('stale', known && !fresh);
   const label = display.querySelector('[data-price-status]');
-  label.textContent = fresh ? 'Live price · USD' : known ? 'Last price · USD' : 'Waiting for price';
+  const quoteCurrency = data?.symbol?.split('/')?.at(-1) || element.dataset.quoteCurrency || 'USDC';
+  element.dataset.quoteCurrency = quoteCurrency;
+  label.textContent = fresh ? 'Live price · '+quoteCurrency : known ? 'Last price · '+quoteCurrency : 'Waiting for price';
   label.title = known ? 'Observed ' + new Date(asof).toISOString() : '';
 }
 chartElements.forEach(element => updateLivePrice(element));
@@ -274,7 +339,8 @@ function drawCandles(element, data) {
   const last = bars[bars.length - 1];
   const fmt = value => Number(value).toLocaleString('en-US', {minimumFractionDigits:Number(element.dataset.digits),maximumFractionDigits:Number(element.dataset.digits)});
   const timeframe = data.interval_ms === 14400000 ? 'four-hour' : `${data.interval_ms / 60000}-minute`;
-  const detail = `${element.dataset.asset}, ${bars.length} ${timeframe} candles. Latest: open ${fmt(last.o)}, high ${fmt(last.h)}, low ${fmt(last.l)}, close ${fmt(last.c)} USD. ${last.current ? (data.degraded ? 'Current candle uses the latest quote while OHLC retries.' : 'Final candle is still forming.') : ''}`;
+  const quoteCurrency = data.symbol?.split('/')?.at(-1) || element.dataset.quoteCurrency || 'USDC';
+  const detail = `${element.dataset.asset}, ${bars.length} ${timeframe} candles. Latest: open ${fmt(last.o)}, high ${fmt(last.h)}, low ${fmt(last.l)}, close ${fmt(last.c)} ${quoteCurrency}. ${last.current ? (data.degraded ? 'Current candle uses the latest quote while OHLC retries.' : 'Final candle is still forming.') : ''}`;
   canvas.setAttribute('aria-label', detail);
   canvas.title = detail;
 }
@@ -310,7 +376,13 @@ refreshCharts();
 window.setInterval(() => {
   document.querySelectorAll('[data-neural-expires]').forEach(element => {
     if (Date.now() > Number(element.dataset.neuralExpires)) {
-      element.textContent = 'Execution window elapsed; showing last classification.';
+      element.textContent = 'Execution window elapsed; showing last decision.';
+    }
+  });
+  document.querySelectorAll('[data-forecast-expires]').forEach(element => {
+    if (Date.now() >= Number(element.dataset.forecastExpires)) {
+      const status = element.querySelector('[data-forecast-status]');
+      if (status) status.textContent = 'Last known forecast · waiting for current candles';
     }
   });
   chartElements.forEach(element => {

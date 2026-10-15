@@ -19,8 +19,8 @@ from zipfile import BadZipFile, ZipFile
 
 from .administration import _check, _finish
 from .backups import backup_path, backup_runtime, state_base
-from .core import DataError, H4, M5, M15, Rules, load_settings, safe_error
-from .ledger import atomic_json
+from .core import DataError, H4, M5, Rules, load_settings, safe_error
+from .storage import atomic_json
 from .persistence import SCHEMA, SQLiteDatabase, SQLiteDocument, connect
 from .state_codec import loads
 from .state_paths import StatePaths, state_owner, validate_documents
@@ -155,7 +155,7 @@ def _validate(documents, contexts):
             if assets != context["assets"] or rules.paper_namespace != name:
                 raise DataError("Backup namespace settings do not match their history.")
             document = documents[name]
-            if name in {"neural", "smc"} and Rules(**document["settings"]).validate() != rules:
+            if name == "neural" and Rules(**document["settings"]).validate() != rules:
                 raise DataError("Backup paper settings disagree with the recorded namespace settings.")
             for asset, configuration in assets.items():
                 if document["assets"].get(asset, {}).get("symbol") != configuration["symbol"]:
@@ -260,19 +260,16 @@ def recover_pending_restore(base, settings_path):
 
 def _engine(runtime, captured):
     assets, rules = captured["assets"], captured["rules"]
-    if runtime.is_neural:
-        from .neural_engine import NeuralEngine
-        path = Path(rules.nn_model_path) if rules.nn_model_path else None
-        if path is not None and not path.is_absolute():
-            path = runtime.settings_path.parent/path
-        engine = NeuralEngine(assets, rules, runtime.store, model_path=path,
-                              settings_path=runtime.settings_path)
-        if engine.model_error:
-            raise DataError(engine.model_error)
-        return engine
-    from .smc_engine import SMCEngine
-    from .engine import Engine
-    return (SMCEngine if runtime.is_smc else Engine)(assets, rules, runtime.store)
+    from .settings_editor import validate_provider_pairs
+    validate_provider_pairs(runtime.provider, assets, rules)
+    from .neural_engine import NeuralEngine
+    engine = NeuralEngine(assets, rules, runtime.store,
+                          feature_provider=getattr(runtime, "neural_feature_provider", None),
+                          settings_path=runtime.settings_path)
+    engine.clock = runtime.provider.now
+    if engine.model_error:
+        raise DataError(engine.model_error)
+    return engine
 
 
 def confirm_restore(runtime, generation, token, confirmation):
@@ -292,9 +289,9 @@ def confirm_restore(runtime, generation, token, confirmation):
         if marker.exists():
             raise DataError("An interrupted restore requires startup recovery first.")
         engine = _engine(runtime, captured)
-        from .gex import NaiveGEX
+        from .gex import DeribitGEX
         from .position_neural import PositionNeuralReader
-        gex = NaiveGEX(captured["assets"], provider=runtime.gex.provider)
+        gex = DeribitGEX(captured["assets"], provider=runtime.gex.provider)
         database = runtime.store._backend.database
         with tempfile.TemporaryDirectory(prefix="restore-apply-") as folder:
             candidate = Path(folder)/"candidate.sqlite3"
@@ -336,19 +333,19 @@ def confirm_restore(runtime, generation, token, confirmation):
         runtime._restore_preview = None
         runtime.assets, runtime.rules, runtime.refresh = captured["assets"], captured["rules"], captured["refresh"]
         runtime.engine, runtime.gex = engine, gex
-        runtime.is_combined = runtime.rules.combined
-        runtime.high_interval = runtime.rules.smc_setup_minutes*60000 if runtime.is_smc else H4
-        runtime.low_interval = runtime.rules.smc_entry_minutes*60000 if runtime.is_smc else M5 if runtime.is_neural else M15
+        change_source = getattr(runtime.provider, "set_preference", None)
+        if callable(change_source):
+            change_source(runtime.rules.market_data_source)
+        runtime.is_combined = True
+        runtime.high_interval = H4
+        runtime.low_interval = M5
         runtime.positions.market_mode = runtime.rules.market_mode
         for name, store in ((runtime.rules.paper_namespace, runtime.store), ("positions", runtime.positions)):
             store._backend.context = copy.deepcopy(captured["contexts"][name])
-        if runtime.rules.paper_namespace == "legacy":
-            from .ledger import validate_state
-            assets, rules = runtime.assets, runtime.rules
-            runtime.store.assets, runtime.store.rules = assets, rules
-            runtime.store._validator = lambda document: validate_state(document, assets, rules)
-        runtime.position_neural, runtime.paper_neural = PositionNeuralReader(), PositionNeuralReader()
+        runtime.position_neural, runtime.paper_neural = (PositionNeuralReader(shared_engine=engine),
+                                                       PositionNeuralReader(shared_engine=engine))
         runtime.structure_baselined = set()
+        runtime.pine_charts = {}
         runtime.paused = bool(runtime.store.snapshot().get("monitoring_paused"))
         message = "Backup restored: saved settings and all trading history. Historical queued alerts were cancelled."
         if captured["saved_differs"]:

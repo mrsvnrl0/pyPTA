@@ -1,0 +1,43 @@
+{% from 'reachability.html' import reachability with context %}
+{% set guide=row.get('guide') or {} %}
+{% set liquidity=row.get('liquidity') or {} %}
+{% set expires=guide.get('expires_ms',row.get('asof_ms',0)+30000) %}
+{% set current=now < expires %}
+<section class="market-summary smc-price-guide" data-market-expires="{{ expires }}" aria-label="{{ name }} SMC price guide">
+  <h3>SMC Engine price guide</h3>
+  <div class="smc-liquidity" data-liquidity-status="{{ liquidity.get('status','unavailable') if current else 'unavailable' }}">
+    <h4>Preliminary liquidity</h4>
+    <p class="muted">Market context only. Entry, target and stop require a qualified SMC setup.</p>
+    <div class="levels">
+    {% for key,label in [('nearest_above','Nearest untaken high'),('highest_above','Highest untaken high'),('nearest_below','Nearest untaken low')] %}
+      {% set point=liquidity.get(key) %}
+      <div><small>{{ label }}</small><strong data-market-level data-liquidity-level="{{ key }}">{{ money(point.price,digits[name],cfg.symbol.split('/')[-1]) if point and current and liquidity.get('status')=='ready' else 'None in available history' if current and liquidity.get('status')=='ready' else 'Waiting for current data' }}</strong></div>
+    {% endfor %}
+    </div>
+    <p class="muted" data-liquidity-message>{% if not current %}Waiting for a fresh scan.{% elif liquidity.get('status')=='ready' %}{{ liquidity.get('above_count',0) }} untaken highs above the ask · {{ liquidity.get('below_count',0) }} untaken lows below the bid. Prices are observed liquidity, without a target buffer.{% else %}{{ liquidity.get('error') or 'Waiting for current candles and a fresh quote.' }}{% endif %}</p>
+  </div>
+  <div class="smc-qualified-plan" data-guide-status="{{ guide.get('status','unavailable') if current else 'unavailable' }}">
+    <h4>Qualified trade plan</h4>
+    <div class="levels">
+      <div><small>Current executable entry</small><strong data-market-level data-qualified-level="entry">{{ money(suggestion.entry_price,digits[name],cfg.symbol.split('/')[-1]) if suggestion and current else 'Not qualified' }}</strong></div>
+      <div><small>Pine signal reference</small><strong>{{ money(suggestion.signal_entry_price,digits[name],cfg.symbol.split('/')[-1]) if suggestion and current else '—' }}</strong></div>
+      <div><small>Perky TP1</small><strong data-market-level data-qualified-level="target">{{ money(suggestion.tp1,digits[name],cfg.symbol.split('/')[-1]) if suggestion and current else 'Not qualified' }}</strong></div>
+      <div><small>Suggested strategy stop</small><strong data-market-level data-qualified-level="stop">{{ money(suggestion.stop,digits[name],cfg.symbol.split('/')[-1]) if suggestion and current else 'Not qualified' }}</strong></div>
+      <div><small>Perky TP3 · final</small><strong>{{ money(suggestion.tp3,digits[name],cfg.symbol.split('/')[-1]) if suggestion and current else 'Not qualified' }}</strong></div>
+    </div>
+    <p class="muted" data-guide-message>{% if not current %}Waiting for a fresh scan.{% elif suggestion %}{{ suggestion.method|capitalize }} · Perky score {{ suggestion.score }}/10. TP3 distance {{ '%.2f'|format(suggestion.get('exit_distance_pct',0)) }}% (minimum {{ '%g'|format(suggestion.get('minimum_exit_distance_pct',0)) }}%). TP1–TP3 follow the Perky script's sorted structural targets.{% else %}No qualified Perky entry plan. Current blockers:{% endif %}</p>
+    {% if suggestion and current %}<p><a class="button" data-qualified-action href="{{ url_for('positions_page',plan_asset=name,plan_id=suggestion.get('id',suggestion.get('key'))) }}">Review prefilled position</a></p><p class="muted">Perky targets: TP1 {{ money(suggestion.tp1,digits[name],cfg.symbol.split('/')[-1]) }} · TP2 {{ money(suggestion.tp2,digits[name],cfg.symbol.split('/')[-1]) }} · TP3 {{ money(suggestion.tp3,digits[name],cfg.symbol.split('/')[-1]) }}. Existing positions keep their saved levels.</p>{% endif %}
+    {% if not suggestion and current %}<ul class="smc-blockers" data-guide-blockers>
+    {% for blocker in guide.get('blockers',[]) %}<li data-blocker-code="{{ blocker.code }}"><strong>{{ 'Bullish entry' if blocker.side=='long' else 'Bearish setup → spot buy' if blocker.side=='short' else 'Market data' }}:</strong> {{ blocker.message }}</li>
+    {% else %}<li>Waiting for current SMC qualification measurements.</li>{% endfor %}
+    </ul>{% endif %}
+  </div>
+  {% for side, reading in row.get('reachability',{}).items() %}{% if reading.get('mode')!='off' %}<div data-refresh-key="{{ name }}:reachability:{{ side }}"><small>{{ side|capitalize }} target</small>{{ reachability(reading,cfg.symbol.split('/')[-1],digits[name]) }}</div>{% endif %}{% endfor %}
+  {% set history=guide.get('history') or {} %}
+  {% if history %}<details class="smc-history" data-panel="{{ name }}:smc-history"><summary>Candle history available</summary>
+    {% for key,label in [('setup','Setup'),('entry','Entry')] %}{% set window=history.get(key) or {} %}
+    <p>{{ label }} · {{ window.get('minutes','—') }}M · {{ window.get('bars',0) }} completed candles<br><small>{{ time(window.get('first_ms')) }} → {{ time(window.get('last_ms')) }}</small></p>
+    {% endfor %}
+    <p class="muted">Completed 1M/5M candles are retained across scans and restarts for up to 16 days. Gaps stay unfilled; the scanner uses the latest continuous history.</p>
+  </details>{% endif %}
+</section>

@@ -10,17 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 
 
-VERSION = 9
-
-
-ENGINE_VERSION = "kraken-closed-bar-v9.3"
-
-
-PREVIOUS_ENGINE_VERSION = "kraken-closed-bar-v9.2"
-
-
-LEGACY_ENGINE_VERSION = "kraken-closed-bar-v9.1"
-
+ENGINE_VERSION = "smc-parente-v1"
 
 H4 = 14_400_000
 
@@ -29,7 +19,7 @@ M15 = 900_000
 
 M5 = 300_000
 M30 = 1_800_000
-SMC_ENGINE_VERSION = "smc-video-v1"
+
 
 
 class DataError(ValueError):
@@ -64,62 +54,62 @@ def safe_error(exc):
 
 @dataclass(frozen=True)
 class Rules:
-    strategy_model: str = "legacy"
-    nn_model_path: str = ""
+    strategy_model: str = "neural_network"
     nn_model_id: str = "parente_mlp_v1"
-    nn_model_bundle_path: str = ""
     nn_limitations: bool = True
     nn_stop_loss: float = 0.10
-    nn_signal_max_age_seconds: int = 60
     market_mode: str = "spot"
+    market_data_source: str = "deribit_first"
+    perky_sweep_len: int = 5
+    perky_internal_len: int = 5
+    perky_swing_len: int = 50
+    perky_min_score: int = 4
+    perky_htf_agreement: int = 0
+    perky_cooldown_bars: int = 25
+    perky_score_sweep: bool = True
+    perky_score_choch: bool = True
+    perky_score_fvg: bool = True
+    perky_score_ob: bool = True
+    perky_score_killzone: bool = True
+    perky_score_ema: bool = True
+    perky_score_rsi: bool = True
+    perky_score_htf: bool = True
+    perky_score_volume: bool = True
+    perky_gate_all: bool = True
+    perky_killzone_only: bool = False
+    perky_require_fvg: bool = False
+    perky_require_ob: bool = False
+    perky_require_choch: bool = False
+    perky_require_smc_bias: bool = False
+    perky_ema_filter: bool = False
+    perky_rsi_filter: bool = False
+    perky_stop_mode: str = "Structure"
+    perky_stop_atr_mult: float = 0.5
+    perky_structure_sl_buffer_atr: float = 0.25
     smc_setup_minutes: int = 30
-    smc_entry_minutes: int = 5
-    smc_entry_method: str = "both"
-    smc_breakout_entry: bool = False
-    smc_breakout_window_bars: int = 6
-    smc_breakout_max_chase_bps: float = 20.0
-    smc_pivot_strength: int = 2
-    smc_reversal_bars: int = 2
-    smc_stop_basis: str = "swing"
     smc_stop_buffer_bps: float = 1.0
-    smc_tp_sweep_buffer_bps: float = 1.0
     smc_tp_alert_bps: float = 10.0
-    smc_gex_targets: bool = False
-    smc_gex_alignment_bps: float = 10.0
-    smc_gex_max_basis_bps: float = 50.0
-    atr_period: int = 14
-    volume_period: int = 20
-    pivot_strength: int = 2
-    ob_lookback: int = 120
-    ob_follow_bars: int = 3
-    setup_lifetime_bars: int = 24
-    bearish_body_atr: float = 0.8
-    bearish_close_location: float = 0.3
-    bearish_rvol_min: float = 0.0  # Optional. Selloff participation is context.
-    reclaim_body_atr: float = 0.6
-    reclaim_close_location: float = 0.7
-    reclaim_rvol_min: float = 1.2
-    sweep_atr: float = 0.05
-    stop_buffer_atr: float = 0.2
-    mss_lookback: int = 3
-    ltf_retest_lifetime_bars: int = 16
-    trigger_fresh_bars: int = 2
-    reclaim_require_trend: bool = False
-    momentum_roc_period: int = 12
-    momentum_signal_period: int = 9
-    momentum_cross_window: int = 3
-    momentum_rvol_min: float = 1.5
-    momentum_rsi_period: int = 14
-    momentum_rsi_min: float = 50.0
-    momentum_rsi_max: float = 80.0
-    momentum_require_trend: bool = True
-    momentum_stop_atr: float = 1.5
-    max_chase_atr: float = 0.25
-    max_spread_bps: float = 30.0
-    target1_net_r: float = 2.0
-    target2_net_r: float = 3.0
-    require_clear_target1: bool = False
-    fee_rate: float = 0.008  # Conservative public Tier 1 spot taker assumption.
+    smc_min_exit_distance_pct: float = 0.0
+    smc_reachability_mode: str = "off"
+    smc_reach_bias_minutes: int = 1440
+    smc_reach_lookback_bars: int = 60
+    smc_reach_swing_len: int = 3
+    smc_reach_atr_period: int = 14
+    smc_reach_event_bars: int = 80
+    smc_reach_entry_zone_pct: float = 50.0
+    smc_reach_max_atr: float = 2.0
+    smc_reach_balance_bars: int = 3
+    smc_reach_balance_atr: float = 1.5
+    smc_reach_equal_bps: float = 10.0
+    smc_reach_fvg_min_atr: float = 0.1
+    smc_reach_fvg_fill_pct: float = 50.0
+    smc_reach_require_bias: bool = True
+    smc_reach_require_cycle: bool = True
+    smc_gex_targets: bool = True
+    smc_gex_alignment_bps: float = 50.0
+    smc_gex_max_basis_bps: float = 100.0
+    max_spread_bps: float = 20.0
+    fee_rate: float = 0.001
     slippage_rate: float = 0.0005
     paper_equity: float = 1000.0
     paper_floor: float = 950.0
@@ -130,116 +120,106 @@ class Rules:
 
     @property
     def combined(self):
-        return self.strategy_model in {"smc_nn", "legacy_nn"}
-
-    @property
-    def base_strategy(self):
-        return {"smc_nn": "smc_video", "legacy_nn": "legacy"}.get(self.strategy_model, self.strategy_model)
+        return True
 
     @property
     def paper_namespace(self):
-        return {"smc_video": "smc", "legacy": "legacy", "neural_network": "neural"}[self.base_strategy]
+        return "neural"
 
     def validate(self):
-        integer_bounds = {
-            "nn_signal_max_age_seconds": (1, 300),
-            "smc_setup_minutes": (15, 30), "smc_entry_minutes": (1, 5),
-            "smc_pivot_strength": (1, 5), "smc_reversal_bars": (0, 5),
-            "smc_breakout_window_bars": (1, 12),
-            "atr_period": (2, 50), "volume_period": (2, 100),
-            "pivot_strength": (1, 5), "ob_lookback": (20, 300),
-            "ob_follow_bars": (1, 6), "setup_lifetime_bars": (1, 40),
-            "mss_lookback": (2, 20), "ltf_retest_lifetime_bars": (1, 64),
-            "trigger_fresh_bars": (1, 4), "momentum_roc_period": (2, 50),
-            "momentum_signal_period": (2, 30), "momentum_cross_window": (1, 6),
-            "momentum_rsi_period": (2, 50),
-        }
-        for key, value in asdict(self).items():
-            if key in {"nn_model_path", "nn_model_bundle_path"}:
-                if not isinstance(value, str) or "\x00" in value or len(value) > 4096:
-                    raise DataError(f"{key} must be a path string")
-            elif key == "nn_model_id":
-                candidate = r"(?:lstm_classifier_v1|gru_classifier_v1|cnn_lstm_classifier_v1|grouped_attention_lstm_v1|probability_ensemble_v1|drl_ppo_classifier_v1)@[0-9a-f]{12}"
-                if type(value) is not str or value != "parente_mlp_v1" and not re.fullmatch(candidate, value):
-                    raise DataError("Unknown NN model selection")
-            elif key in {"strategy_model", "market_mode", "smc_entry_method", "smc_stop_basis"}:
-                allowed = {"strategy_model": {"legacy", "smc_video", "neural_network", "smc_nn", "legacy_nn"},
-                           "market_mode": {"spot", "margin"},
-                           "smc_entry_method": {"both", "conservative", "aggressive"},
-                           "smc_stop_basis": {"swing", "order_block", "atr"}}[key]
-                if value not in allowed:
-                    raise DataError(f"Invalid {key}")
-            elif key in integer_bounds:
-                low, high = integer_bounds[key]
-                if type(value) is not int or not low <= value <= high:
-                    raise DataError(f"{key} must be an integer from {low} to {high}")
-            elif key in {"nn_limitations", "reclaim_require_trend", "momentum_require_trend", "require_clear_target1", "smc_gex_targets", "smc_breakout_entry"}:
-                if type(value) is not bool:
-                    raise DataError(f"{key} must be true or false")
+        bounds={"perky_sweep_len":(1,50),"perky_internal_len":(1,20),"perky_swing_len":(10,200),
+                "perky_min_score":(0,10),"perky_htf_agreement":(0,4),"perky_cooldown_bars":(5,300),
+                "smc_reach_lookback_bars":(15,200), "smc_reach_swing_len":(2,20), "smc_reach_atr_period":(1,50),
+                "smc_reach_event_bars":(2,600), "smc_reach_balance_bars":(2,20)}
+        bool_keys={"nn_limitations","smc_gex_targets","smc_reach_require_bias","smc_reach_require_cycle",
+                   "perky_gate_all","perky_killzone_only","perky_require_fvg","perky_require_ob",
+                   "perky_require_choch","perky_require_smc_bias","perky_ema_filter","perky_rsi_filter",
+                   "perky_score_sweep","perky_score_choch","perky_score_fvg","perky_score_ob",
+                   "perky_score_killzone","perky_score_ema","perky_score_rsi","perky_score_htf","perky_score_volume"}
+        for key,value in asdict(self).items():
+            if key in {"strategy_model","nn_model_id","market_mode","market_data_source","smc_reachability_mode","perky_stop_mode"}:
+                allowed={"strategy_model":{"neural_network"},"nn_model_id":{"parente_mlp_v1"},
+                         "market_mode":{"spot","margin"},"market_data_source":{"deribit_first","binance"},
+                         "perky_stop_mode":{"Structure","ATR"}, "smc_reachability_mode":{"off","advisory","enforce"}}[key]
+                if not isinstance(value,str) or value not in allowed:raise DataError("Invalid "+key)
+            elif key in bool_keys:
+                if type(value) is not bool:raise DataError(key+" must be true or false")
+            elif key=="smc_setup_minutes":
+                if type(value) is not int or value not in {1,5,15,30,240}:raise DataError("Choose a supported SMC chart timeframe")
+            elif key == "smc_reach_bias_minutes":
+                if type(value) is not int or value not in {240,1440}:
+                    raise DataError("Reachability bias timeframe must be 240 or 1440 minutes")
+            elif key in bounds:
+                low,high=bounds[key]
+                if type(value) is not int or not low<=value<=high:raise DataError(f"{key} must be an integer from {low} to {high}")
             else:
-                if type(value) not in {int, float}:
-                    raise DataError(f"{key} must be a JSON number")
-                finite(value, key, 0)
-        for key in ("bearish_close_location", "reclaim_close_location", "risk_per_trade", "max_total_risk", "max_allocation"):
-            if not 0 < getattr(self, key) <= 1:
-                raise DataError(f"{key} must be in (0, 1]")
-        if self.nn_model_id == "parente_mlp_v1" and self.nn_model_bundle_path:
-            raise DataError("NN model bundle path applies only to candidate models")
-        if self.nn_model_id != "parente_mlp_v1" and self.nn_model_path:
-            raise DataError("Parente model path must be empty when selecting a candidate")
-        if not 0 <= self.fee_rate < 0.05 or not 0 <= self.slippage_rate < 0.05:
-            raise DataError("Fee and slippage rates must be fractions below 0.05")
-        if not 0 < self.nn_stop_loss <= .10:
-            raise DataError("nn_stop_loss must be in (0, 0.10]")
-        if not 0 < self.smc_breakout_max_chase_bps <= 100:
-            raise DataError("Breakout maximum chase must be greater than zero and at most 100 bps")
-        if not 0 <= self.momentum_rsi_min < self.momentum_rsi_max <= 100:
-            raise DataError("Invalid RSI interval")
-        if not 1 <= self.target1_net_r < self.target2_net_r:
-            raise DataError("Require 1 <= TP1 net R < TP2 net R")
-        if not 0 <= self.paper_floor < self.paper_equity:
-            raise DataError("Require 0 <= paper_floor < paper_equity")
-        if self.risk_per_trade > self.max_total_risk:
-            raise DataError("Per-trade risk exceeds portfolio risk")
-        if self.stop_buffer_atr <= 0 or self.momentum_stop_atr <= 0:
-            raise DataError("Stop distances must be positive")
-        if (self.smc_setup_minutes, self.smc_entry_minutes) not in {(30, 5), (15, 1)}:
-            raise DataError("Video timeframes must be 30M/5M or 15M/1M")
-        if not 0 < self.smc_stop_buffer_bps <= 100:
-            raise DataError("SMC stop buffer must be above 0 and at most 100 basis points")
-        if not 0 < self.smc_tp_sweep_buffer_bps <= 100:
-            raise DataError("SMC take-profit sweep buffer must be above 0 and at most 100 basis points")
-        if not 0 <= self.smc_tp_alert_bps <= 100:
-            raise DataError("SMC take-profit alert range must be from 0 to 100 basis points (0 disables alerts)")
-        # GEX tolerances use the finite, non-negative JSON-number checks above;
-        # unlike stop and sweep buffers, they have no percentage ceiling.
+                if type(value) not in {int,float}:raise DataError(key+" must be a JSON number")
+                finite(value,key,0)
+        for key in ("risk_per_trade","max_total_risk","max_allocation"):
+            if not 0<getattr(self,key)<=1:raise DataError(key+" must be in (0, 1]")
+        if self.perky_stop_atr_mult < 0.1 or self.perky_stop_atr_mult > 5:
+            raise DataError("Perky ATR stop multiplier must be in [0.1, 5]")
+        if not 0 <= self.perky_structure_sl_buffer_atr <= 2:
+            raise DataError("Perky structure stop buffer must be in [0, 2] ATR")
+        if not 0<=self.fee_rate<.05 or not 0<=self.slippage_rate<.05:raise DataError("Fee/slippage must be fractions below 0.05")
+        if not 0<self.nn_stop_loss<=.10:raise DataError("Manual paper stop must be in (0, 0.10]")
+        if not 0<=self.paper_floor<self.paper_equity:raise DataError("Require 0 <= paper_floor < paper_equity")
+        if self.risk_per_trade>self.max_total_risk:raise DataError("Per-trade risk exceeds portfolio risk")
+        if not 0<self.smc_stop_buffer_bps<=100:raise DataError("SMC stop buffer must be in (0, 100] bps")
+        if not 0<=self.smc_tp_alert_bps<=100:raise DataError("TP proximity must be in [0, 100] bps")
+        if not 0 <= self.smc_min_exit_distance_pct <= 100:
+            raise DataError("Minimum SMC final-exit distance must be in [0, 100] percent")
+        if self.smc_reachability_mode != "off" and self.smc_reach_bias_minutes <= self.smc_setup_minutes:
+            raise DataError("Reachability bias timeframe must be higher than the SMC chart timeframe")
+        if self.smc_reach_lookback_bars < max(2*self.smc_reach_swing_len+3, self.smc_reach_atr_period+1, self.smc_reach_balance_bars):
+            raise DataError("Reachability history must cover swing confirmation, ATR and balance windows")
+        if not 0 < self.smc_reach_entry_zone_pct <= 100 or not 0 < self.smc_reach_fvg_fill_pct <= 100:
+            raise DataError("Reachability zone and FVG fill percentages must be in (0, 100]")
+        if not 0 < self.smc_reach_max_atr <= 20 or not 0 < self.smc_reach_balance_atr <= 20:
+            raise DataError("Reachability ATR multiples must be in (0, 20]")
+        if not 0 <= self.smc_reach_equal_bps <= 500 or not 0 <= self.smc_reach_fvg_min_atr <= 5:
+            raise DataError("Reachability equal-level tolerance or FVG minimum is out of range")
         return self
 
 
+def exit_distance_pct(entry, target, side):
+    """Native-price distance in the trade direction; no currency conversion."""
+    if side not in {"long", "short"}:
+        raise DataError("Invalid target direction")
+    entry = finite(entry, "exit-distance entry", 1e-15)
+    target = finite(target, "exit-distance target", 1e-15)
+    return (target / entry - 1) * (100 if side == "long" else -100)
+
+
 DEFAULT_ASSETS = [
-    {"name": "BTC", "symbol": "BTC/USD", "enabled": True, "price_decimals": 2},
-    {"name": "ETH", "symbol": "ETH/USD", "enabled": True, "price_decimals": 2},
-    {"name": "SOL", "symbol": "SOL/USD", "enabled": True, "price_decimals": 3},
+    {"name": "BTC", "symbol": "BTC/USDC", "enabled": True, "price_decimals": 2},
+    {"name": "ETH", "symbol": "ETH/USDC", "enabled": True, "price_decimals": 2},
+    {"name": "SOL", "symbol": "SOL/USDC", "enabled": True, "price_decimals": 3},
 ]
 
 
 def normalise_pair(symbol):
-    compact = re.sub(r"[\s/_-]", "", str(symbol).upper())
-    # Kraken can return legacy internal keys (for example XXBTZUSD) even
-    # when a display-name response was requested. Accept those read-only
-    # aliases wherever a pair key is compared.
-    for internal_quote, quote in (("ZUSD", "USD"), ("ZEUR", "EUR"), ("ZGBP", "GBP"),
-                                  ("ZCAD", "CAD"), ("ZAUD", "AUD"), ("ZJPY", "JPY"), ("ZCHF", "CHF")):
-        if compact.endswith(internal_quote) and len(compact) > len(internal_quote):
-            base = compact[:-len(internal_quote)]
-            if base.startswith("X") and len(base) > 1:
-                base = base[1:]
-            return f"{'BTC' if base == 'XBT' else base}/{quote}"
-    for quote in ("USDT", "USDC", "USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF", "XBT", "BTC", "ETH"):
-        if compact.endswith(quote) and len(compact) > len(quote):
-            base = compact[:-len(quote)]
-            return f"{'BTC' if base == 'XBT' else base}/{'BTC' if quote == 'XBT' else quote}"
-    raise DataError("Invalid pair; use BTC/USD")
+    """Canonical explicit exchange pair; compact common quotes are a convenience."""
+    if not isinstance(symbol, str):
+        raise DataError("Invalid pair; use an explicit BASE/QUOTE such as BTC/USDC")
+    value = re.sub(r"\s+", "", symbol.upper())
+    explicit = re.fullmatch(r"([^/_-]{1,30})[/_-]([^/_-]{1,30})", value)
+    if explicit:
+        base, quote = explicit.groups()
+        if base != quote and base.isalnum() and quote.isalnum():
+            return f"{base}/{quote}"
+    elif re.fullmatch(r"[A-Z0-9]{2,60}", value):
+        for quote in ("FDUSD", "USDC", "USDT", "TUSD", "BUSD", "USDP", "DAI", "USD", "EUR", "GBP", "AUD", "BRL", "TRY", "JPY", "BTC", "ETH", "BNB"):
+            if value.endswith(quote) and len(value) > len(quote):
+                base = value[:-len(quote)]
+                if len(base) <= 30 and base != quote:
+                    return f"{base}/{quote}"
+    raise DataError("Invalid pair; use an explicit BASE/QUOTE such as BTC/USDC")
+
+
+def validate_feed_pair(pair):
+    """Validate pair syntax; live exchange catalogs decide availability."""
+    return normalise_pair(pair)
 
 
 def load_settings(path):
@@ -268,9 +248,9 @@ def load_settings(path):
         digits = entry.get("price_decimals", 3)
         if not name.isalnum() or name in assets or pair in pairs:
             raise DataError("Asset names and pairs must be distinct")
-        # Cash and portfolio risk are denominated in USD. Do not mix quote units.
-        if not pair.endswith("/USD"):
-            raise DataError(f"{pair}: USD quote required for the USD paper portfolio")
+        if name != pair.split("/")[0]:
+            raise DataError(f"{pair}: asset name must match the pair base asset")
+        validate_feed_pair(pair)
         if type(digits) is not int or not 0 <= digits <= 10:
             raise DataError("price_decimals must be an integer from 0 to 10")
         assets[name] = {"symbol": pair, "price_decimals": digits}
@@ -285,9 +265,9 @@ def load_settings(path):
 
 
 def load_application_settings(path):
-    """The live application always simulates NN; old strategy ledgers stay readable."""
+    """Run the combined SMC + Parente paper strategy in its neural ledger."""
     assets, rules, refresh = load_settings(path)
-    return assets, replace(rules, strategy_model="neural_network"), refresh
+    return assets, rules, refresh
 
 
 @dataclass(frozen=True)
@@ -326,21 +306,6 @@ def validate_candles(candles, interval, now, minimum=1, fresh=True):
     return candles
 
 
-def parse_kraken_rows(rows, interval, now):
-    if not isinstance(rows, list) or len(rows) < 2:
-        raise DataError("Kraken returned insufficient OHLC rows")
-    candles = []
-    # Kraken explicitly marks the final row as uncommitted, even at a boundary.
-    for row in rows[:-1]:
-        if not isinstance(row, list) or len(row) < 8:
-            raise DataError("Malformed Kraken OHLC row")
-        stamp = finite(row[0], "Kraken timestamp", 0)
-        if not stamp.is_integer():
-            raise DataError("Kraken timestamp must be integer seconds")
-        bar = Candle(int(stamp) * 1000, *(finite(row[i], "OHLC", 1e-15) for i in (1, 2, 3, 4)), finite(row[6], "base volume", 0), interval)
-        if bar.end < now:
-            candles.append(bar)
-    return validate_candles(candles, interval, now)
 
 
 def atr_series(candles, period=14):
@@ -353,51 +318,14 @@ def atr_series(candles, period=14):
     return result
 
 
-def ema(values, period):
-    if not values:
-        return []
-    result = [values[0]]
-    alpha = 2 / (period + 1)
-    for value in values[1:]:
-        result.append(result[-1] + alpha * (value - result[-1]))
-    return result
 
 
-def rsi_series(closes, period=14):
-    result = [None] * len(closes)
-    if len(closes) <= period:
-        return result
-    changes = [b-a for a, b in zip(closes, closes[1:])]
-    gain = sum(max(x, 0) for x in changes[:period]) / period
-    loss = sum(max(-x, 0) for x in changes[:period]) / period
-    def value():
-        return (100 if gain else 50) if loss == 0 else 100 - 100 / (1 + gain / loss)
-    result[period] = value()
-    for i in range(period+1, len(closes)):
-        change = changes[i-1]
-        gain = (gain * (period-1) + max(change, 0)) / period
-        loss = (loss * (period-1) + max(-change, 0)) / period
-        result[i] = value()
-    return result
 
 
-def rvol(candles, index, period):
-    if index < period:
-        return None
-    baseline = sum(b.v for b in candles[index-period:index]) / period
-    return candles[index].v / baseline if baseline > 0 else None
 
 
-def location(bar):
-    return (bar.c-bar.l) / (bar.h-bar.l) if bar.h > bar.l else 0.5
 
 
-def pivot(candles, i, strength, known_at, high=False):
-    if i < strength or i + strength > known_at:
-        return False
-    value = candles[i].h if high else candles[i].l
-    neighbours = candles[i-strength:i] + candles[i+1:i+strength+1]
-    return all(value > b.h if high else value < b.l for b in neighbours)
 
 
 def check(key, label, passed=None, measured=None, required=None, candle=None, context=False):
@@ -409,9 +337,3 @@ def passed(checks):
     return all(c["status"] in {"pass", "context"} for c in checks)
 
 
-def trend_at(candles, i):
-    if i < 249:
-        return None
-    closes = [b.c for b in candles[:i+1]]
-    e50, e200 = ema(closes, 50)[-1], ema(closes, 200)[-1]
-    return closes[-1] > e200 and e50 > e200

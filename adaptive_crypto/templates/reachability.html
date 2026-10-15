@@ -1,0 +1,17 @@
+{% macro reachability(r, currency='USD', places=2) -%}
+{% if r and r.get('mode') != 'off' %}
+{% set current=r.get('expires_ms',0)>now and r.get('status')!='unavailable' %}
+<details class="target-reachability" data-reachability-expires="{{ r.get('expires_ms',0) }}" data-reachability-mode="{{ r.get('mode') }}">
+<summary><strong>Target reachability ({{ r.get('mode') }})</strong> · <span data-reachability-label>{{ r.get('label') if current else 'Assessment unavailable' }}</span></summary>
+<p class="muted">{{ r.get('scope','Current assessment of the saved target') }} · {{ money(r.get('target'),places,currency) }}. {% if r.get('mode')=='advisory' %}Advisory only; qualification and saved targets are unchanged.{% endif %} Structural evidence, without a calibrated target-hit probability.</p>
+<p class="muted" data-reachability-wait{% if current %} hidden{% endif %}>{{ r.get('error','Waiting for current evidence and a fresh price.') }}</p>
+<div class="reachability-evidence"{% if not current %} hidden{% endif %}>
+{% if r.get('dealing_range') %}<p>Confirmed range {{ money(r.dealing_range.low,places,currency) }} → {{ money(r.dealing_range.high,places,currency) }} · equilibrium {{ money(r.dealing_range.equilibrium,places,currency) }}.</p>{% endif %}
+<p>{{ r.get('timeframe_minutes','—') }}M bias: {{ r.get('bias','unavailable') }} · {{ r.get('cycle','Unconfirmed') }} · target {{ r.get('target_type','unknown') }}.</p>
+{% set draw=r.get('draw') or {} %}{% set internal=draw.get('internal') %}
+{% if internal %}<p>Nearest internal draw: {{ internal.kind }} {{ money(internal.low,places,currency) }} → {{ money(internal.high,places,currency) }}.</p>{% endif %}
+<ul>{% for c in r.get('checks',[]) %}<li class="{{ 'pass' if c.status=='pass' else 'wait' }}"><strong>{{ c.label }} · {{ c.status|capitalize }}:</strong> {{ c.detail }}{% if not c.required %} (Context only){% endif %}</li>{% endfor %}</ul>
+<small>Assessed {{ time(r.get('observed_ms')) }} · higher-timeframe candle {{ time(r.get('bias_asof_ms')) }}. Balance and ATR describe observed movement, not a deadline or guarantee.</small>
+</div></details>
+{% endif %}
+{%- endmacro %}

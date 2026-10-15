@@ -1,0 +1,13 @@
+<section class="settings-card" id="dvol-settings" aria-labelledby="dvol-settings-title">
+<h2 id="dvol-settings-title">DVOL pairs</h2>
+<p class="muted">Configure DVOL separately from the dashboard currency pairs. Add only BTC or ETH pairs available on Deribit. Each uses Deribit's official volatility index and the matching Deribit reference price; its quote currency is shown on the DVOL page.</p>
+<form id="dvol-settings-form" action="/api/settings/dvol">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div id="dvol-pair-rows"></div>
+<datalist id="dvol-pair-suggestions"></datalist>
+<div class="form-actions"><button id="dvol-add-pair" class="secondary" type="button" disabled>Add DVOL pair</button><button type="submit" disabled>Save DVOL settings</button><button id="dvol-discard-pairs" class="secondary" type="button">Reload / discard edits</button></div>
+</form>
+<p id="dvol-pairs-availability" class="muted" role="status">Checking available Deribit pairs…</p>
+<p id="dvol-settings-result" role="status" aria-live="polite"></p>
+<p class="muted">Saving applies these pairs immediately to <a href="{{ url_for('dvol_page') }}">DVOL</a>. Parente inputs and the dashboard pair settings are independent.</p>
+</section>

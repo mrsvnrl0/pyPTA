@@ -1,6 +1,5 @@
 from pathlib import Path
 import ast
-import importlib.util
 import os
 import sys
 from PyInstaller.utils.hooks import collect_all
@@ -14,12 +13,6 @@ protected = flavor == 'Obfuscated'
 code = root/'obfuscated' if protected else root
 ta_data, ta_bins, ta_hidden = collect_all('talib')
 model_files = sorted(packaged_model_paths(root))
-has_candidates = any('candidates' in path.relative_to(root).parts for path in model_files)
-ort_data, ort_bins, ort_hidden = ([], [], [])
-if has_candidates:
-    if importlib.util.find_spec('onnxruntime') is None:
-        raise RuntimeError('Candidate bundles require pinned onnxruntime in the Windows build environment')
-    ort_data, ort_bins, ort_hidden = collect_all('onnxruntime')
 package_modules = []
 external_modules = set()
 for module_path in [*(root/'adaptive_crypto').rglob('*.py'), root/'windows_launcher.py']:
@@ -33,15 +26,17 @@ for module_path in [*(root/'adaptive_crypto').rglob('*.py'), root/'windows_launc
             external_modules.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             external_modules.add(node.module)
-hidden = ta_hidden + ort_hidden + ['numpy', 'pandas', 'talib', 'h5py', 'openai', 'certifi',
+hidden = ta_hidden + ['numpy', 'pandas', 'talib', 'certifi',
                      'tkinter.ttk', 'tkinter.messagebox'] + package_modules + sorted(external_modules)
 if protected:
     hidden += [p.name for p in code.glob('pyarmor_runtime_*') if p.is_dir()]
 datas = [(str(root/'adaptive_crypto'/name), 'adaptive_crypto/'+name)
          for name in ('templates', 'static')]
 datas += [(str(path), path.parent.relative_to(root).as_posix()) for path in model_files]
-datas += [(str(root/'packaging'/'licenses'), 'licenses')] + ta_data + ort_data
-a = Analysis([str(code/'windows_launcher.py')], pathex=[str(code)], binaries=ta_bins + ort_bins,
+datas += [(str(root/'adaptive_crypto'/'models'/'self_test_btc.json'), 'adaptive_crypto/models')]
+datas += [(str(root/'scripts'/'pine'/'perky_smc_ultimate_v5.pine'), 'scripts/pine')]
+datas += [(str(root/'packaging'/'licenses'), 'licenses')] + ta_data
+a = Analysis([str(code/'windows_launcher.py')], pathex=[str(code)], binaries=ta_bins,
              datas=datas, hiddenimports=hidden, hookspath=[], hooksconfig={}, runtime_hooks=[],
              excludes=['pytest', 'IPython', 'matplotlib', 'scipy'], noarchive=False, optimize=0)
 pyz = PYZ(a.pure)

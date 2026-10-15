@@ -1,0 +1,36 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DVOL · pyPTA</title><link rel="stylesheet" href="{{ url_for('static',filename='dashboard.css') }}"><link rel="stylesheet" href="{{ url_for('static',filename='dvol.css') }}"></head>
+<body><main class="dvol-page">
+<header><div><div class="eyebrow">pyPTA · Deribit index</div><h1>DVOL</h1><p class="muted">Deribit's official annualized implied-volatility index. Its pairs are configured separately in Settings.</p></div></header>
+{% include 'navigation.html' %}
+<section class="settings-card">
+<div class="dvol-toolbar">
+<label>DVOL pair<select id="dvol-asset" {% if not dvol_pairs %}disabled{% endif %}>{% for pair in dvol_pairs %}<option value="{{ pair }}">{{ pair }}</option>{% endfor %}</select></label>
+<label>Period<select id="dvol-period"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></select></label>
+<span id="dvol-status" class="dvol-freshness" role="status">{% if dvol_pairs %}Loading DVOL…{% else %}No enabled DVOL pairs{% endif %}</span>
+</div>
+{% if not dvol_pairs %}<p class="muted">Add an enabled Deribit BTC or ETH pair in the <a href="{{ url_for('settings_page') }}#dvol-settings">DVOL Settings section</a>.</p>{% endif %}
+<div class="dvol-canvas-wrap"><canvas id="dvol-canvas" tabindex="0" role="img" aria-label="DVOL implied volatility index chart"></canvas></div>
+<p id="dvol-hover" class="muted">Historical index level. The last point may still be forming and is labelled as such in the table.</p>
+</section>
+<section class="settings-card">
+<h2>Reading</h2>
+<div class="levels" id="dvol-summary">
+<div><small>Latest DVOL</small><strong id="dvol-latest">—</strong></div>
+<div><small>Reference price</small><strong id="dvol-price">—</strong></div>
+<div><small>Freshness</small><strong id="dvol-freshness">—</strong></div>
+</div>
+<p class="muted" id="dvol-units">DVOL is annualized volatility in percentage points; it is not a price prediction.</p>
+<h3>Approximate expected move</h3>
+<div class="dvol-move" id="dvol-move" role="table" aria-label="Approximate expected move">
+<div role="row" class="dvol-move-row dvol-move-head"><span role="columnheader">1 day</span><span role="columnheader">7 days</span><span role="columnheader">30 days</span></div>
+<div role="row" class="dvol-move-row"><span id="dvol-move-1d" role="cell">—</span><span id="dvol-move-7d" role="cell">—</span><span id="dvol-move-30d" role="cell">—</span></div>
+</div>
+<p class="muted" id="dvol-move-error" role="status"></p>
+<p class="muted" id="dvol-move-note">Move is the latest index price × DVOL ÷ 100 × √(days ÷ 365): a one-standard-deviation volatility range, not a directional forecast.</p>
+</section>
+<section class="settings-card">
+<h2>Recent history</h2>
+<div class="dvol-table-wrap"><table><thead><tr><th>Time (UTC)</th><th>Open</th><th>High</th><th>Low</th><th>Close</th></tr></thead><tbody id="dvol-rows"></tbody></table></div>
+</section>
+<p class="muted">Source: <a href="https://docs.deribit.com/api-reference/market-data/public-get_volatility_index_data" target="_blank" rel="noopener">Deribit get_volatility_index_data</a> · <a href="https://insights.deribit.com/exchange-updates/dvol-deribit-implied-volatility-index/" target="_blank" rel="noopener">DVOL methodology</a>. DVOL is only published for BTC and ETH. Each enabled pair requires an available Deribit market and its matching Deribit index. <a href="{{ url_for('settings_page') }}#dvol-settings">Edit DVOL pairs</a>.</p>
+{% include 'page_footer.html' %}</main><script src="{{ url_for('static',filename='dvol.js') }}" defer></script></body></html>

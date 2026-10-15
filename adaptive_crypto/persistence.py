@@ -1,4 +1,4 @@
-"""Synchronous JSON compatibility and incremental SQLite WAL persistence."""
+"""Synchronous current JSON and incremental SQLite WAL persistence."""
 from __future__ import annotations
 
 import copy
@@ -11,7 +11,7 @@ from .core import DataError
 from .state_codec import decode, dumps, encode
 from .state_lock import SingleInstance
 
-APPLICATION_ID = 0x50594143  # PYAC
+APPLICATION_ID = 0x50595054  # PYPT
 SCHEMA_VERSION = 1
 SCHEMA = (
     "CREATE TABLE namespaces (namespace TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision>=0), root_json TEXT NOT NULL, context_json TEXT NOT NULL)",
@@ -26,15 +26,13 @@ def wal_version_supported(version):
 
 def check_sqlite_runtime():
     if not wal_version_supported(sqlite3.sqlite_version_info):
-        raise DataError(f"SQLite {sqlite3.sqlite_version} lacks the WAL-reset fix. Use Python linked to SQLite 3.51.3+ (or 3.50.7/3.44.6 backport). JSON mode remains available for unmigrated state.")
+        raise DataError(f"SQLite {sqlite3.sqlite_version} lacks the WAL-reset fix. Use Python linked to SQLite 3.51.3+ (or 3.50.7/3.44.6 backport). Current-format JSON mode remains available.")
     if sqlite3.threadsafety == 0:
         raise DataError("SQLite was built without thread safety")
 
 
 def connect(path, *, readonly=False):
-    options = {"isolation_level": None, "check_same_thread": False, "timeout": 5.0}
-    if hasattr(sqlite3, "LEGACY_TRANSACTION_CONTROL"):
-        options["autocommit"] = sqlite3.LEGACY_TRANSACTION_CONTROL
+    options = {"autocommit": True, "check_same_thread": False, "timeout": 5.0}
     if readonly:
         return sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro", uri=True, **options)
     return sqlite3.connect(path, **options)
@@ -131,7 +129,7 @@ class SQLiteDatabase:
     def namespace(self, namespace):
         with self.lock:
             self._ready()
-            if namespace not in {"legacy", "smc", "neural", "positions"} or namespace in self._bound:
+            if namespace not in {"neural", "positions"} or namespace in self._bound:
                 raise DataError("Unknown or already bound state namespace")
             self._bound.add(namespace)
             return SQLiteDocument(self, namespace)

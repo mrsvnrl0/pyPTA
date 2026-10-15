@@ -1,4 +1,4 @@
-"""Read-only Deribit option data with optional, memory-only OAuth sessions."""
+"""Read-only Deribit market data with optional, memory-only OAuth sessions."""
 from __future__ import annotations
 
 import hashlib
@@ -16,9 +16,12 @@ from .core import DataError
 API_URL = "https://www.deribit.com/api/v2/"
 REQUEST_TIMEOUT = (4, 8)
 AUTH_COOLDOWN = 30.0
+PUBLIC_METHODS = {"public/get_instruments", "public/get_book_summary_by_currency", "public/get_index_price",
+                  "public/get_tradingview_chart_data", "public/get_time", "public/get_index_price_names",
+                  "public/get_index_chart_data", "public/get_volatility_index_data", "public/ticker"}
 AUTH_ERROR = "Deribit authentication failed; check the configured production API credentials"
 CREDENTIAL_ERROR = "Deribit credentials could not be read; check the connection settings"
-CHANGED_ERROR = "Deribit credentials changed; retry the options request"
+CHANGED_ERROR = "Deribit credentials changed; retry the market-data request"
 
 
 class _ClientError(DataError):
@@ -101,18 +104,21 @@ class DeribitClient:
     def _rpc(session, method, params, token=None):
         # No arbitrary URLs or methods, URL credentials, redirects, or response
         # messages may reach callers. requests exceptions can contain secrets.
-        if method not in {"public/auth", "public/get_instruments",
-                          "public/get_book_summary_by_currency", "public/get_index_price"}:
+        if method not in PUBLIC_METHODS | {"public/auth"}:
             raise _ClientError("Unsupported Deribit market-data request")
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if token is not None:
             headers["Authorization"] = "Bearer " + token
         try:
-            response = session.post(API_URL + method,
-                                    json={"jsonrpc": "2.0", "id": uuid.uuid4().hex,
-                                          "method": method, "params": params},
-                                    headers=headers, timeout=REQUEST_TIMEOUT,
-                                    allow_redirects=False)
+            if method == "public/auth":
+                response = session.post(API_URL + method,
+                                        json={"jsonrpc": "2.0", "id": uuid.uuid4().hex,
+                                              "method": method, "params": params},
+                                        headers=headers, timeout=REQUEST_TIMEOUT,
+                                        allow_redirects=False)
+            else:
+                response = session.get(API_URL + method, params={key: (str(value).lower() if type(value) is bool else value) for key, value in params.items()}, headers=headers,
+                                       timeout=REQUEST_TIMEOUT, allow_redirects=False)
             if response.status_code == 401:
                 raise _TokenError(AUTH_ERROR)
             if response.status_code == 403:
@@ -127,7 +133,7 @@ class DeribitClient:
         except Exception:
             raise _ClientError("Deribit market-data request failed") from None
         if not isinstance(body, dict):
-            raise _ClientError("Deribit returned an invalid options response")
+            raise _ClientError("Deribit returned an invalid market-data response")
         error = body.get("error")
         if error:
             code = error.get("code") if isinstance(error, dict) else None
@@ -136,9 +142,9 @@ class DeribitClient:
                 raise _TokenError(AUTH_ERROR)
             if code in (10000, 10001, 13004) or message in ("invalid_credentials", "authorization_required", "insufficient_scope"):
                 raise _AuthError(AUTH_ERROR)
-            raise _ClientError("Deribit rejected the options request")
+            raise _ClientError("Deribit rejected the market-data request")
         if "result" not in body:
-            raise _ClientError("Deribit returned an invalid options response")
+            raise _ClientError("Deribit returned an invalid market-data response")
         return body["result"]
 
     def _get_token(self, session, rejected=None):
@@ -213,49 +219,29 @@ class DeribitClient:
                                     token_expires_ms=int((self._wall_clock() + lifetime) * 1000))
                 return token, generation
 
-    def fetch(self, base, currency):
-        """Return (instruments, summaries, index_price) for NaiveGEX."""
-        if (base, currency) not in {("BTC", "BTC"), ("ETH", "ETH"), ("SOL", "USDC")}:
-            raise _ClientError("Unsupported Deribit options asset")
+    def request(self, method, params=None):
+        """A bounded, read-only RPC using the shared optional authentication."""
+        if method not in PUBLIC_METHODS:
+            raise _ClientError("Unsupported Deribit market-data request")
         with self._state_lock:
             generation = self._generation
-        retried = False
         try:
             with self._session_factory() as session:
-                # Prevent .netrc authentication from overriding Bearer headers.
                 session.trust_env = False
-                results = []
-                requests_to_make = (
-                    ("public/get_instruments", {"currency": currency, "kind": "option", "expired": False}),
-                    ("public/get_book_summary_by_currency", {"currency": currency, "kind": "option"}),
-                    ("public/get_index_price", {"index_name": base.lower() + ("_usdc" if currency == "USDC" else "_usd")}))
-                for method, params in requests_to_make:
-                    token, generation = self._get_token(session)
-                    try:
-                        result = self._rpc(session, method, params, token)
-                    except _TokenError:
-                        if token is None or retried:
-                            raise
-                        retried = True
-                        token, generation = self._get_token(session, rejected=(token, generation))
-                        result = self._rpc(session, method, params, token)
-                    results.append(result)
-                instruments, summaries, index = results
-                if (not isinstance(instruments, list) or not isinstance(summaries, list) or
-                        not all(isinstance(row, dict) for row in instruments + summaries) or
-                        not isinstance(index, dict) or isinstance(index.get("index_price"), bool)):
-                    raise _ClientError("Deribit returned an invalid options response")
+                token, generation = self._get_token(session)
                 try:
-                    spot = float(index["index_price"])
-                    if not math.isfinite(spot) or spot <= 0:
-                        raise ValueError()
-                except (KeyError, TypeError, ValueError, OverflowError):
-                    raise _ClientError("Deribit returned an invalid options response") from None
+                    result = self._rpc(session, method, params or {}, token)
+                except _TokenError:
+                    if token is None:
+                        raise
+                    token, generation = self._get_token(session, rejected=(token, generation))
+                    result = self._rpc(session, method, params or {}, token)
             with self._state_lock:
-                if generation == self._generation and not self._failure:
-                    self._status.update(state="connected" if token else "public", error=None,
-                                        last_success_ms=int(self._wall_clock() * 1000))
-            return instruments, summaries, spot
+                if generation != self._generation:
+                    raise _ClientError(CHANGED_ERROR)
+                self._status.update(state="connected" if token else "public", error=None,
+                                    last_success_ms=int(self._wall_clock()*1000))
+            return result
         except _AuthError:
             self._failed(AUTH_ERROR, generation, cooldown=True)
             raise _ClientError(AUTH_ERROR) from None

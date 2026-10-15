@@ -1,5 +1,7 @@
 <nav class="dashboard-tabs" aria-label="Dashboard navigation">
 <a href="{{ url_for('dashboard') }}" {% if request.endpoint == 'dashboard' %}aria-current="page"{% endif %}>Home</a>
+<a href="{{ url_for('pine_chart_page') }}" {% if request.endpoint == 'pine_chart_page' %}aria-current="page"{% endif %}>SMC Chart</a>
+<a href="{{ url_for('dvol_page') }}" {% if request.endpoint == 'dvol_page' %}aria-current="page"{% endif %}>DVOL</a>
 <a href="{{ url_for('paper_page') }}" {% if request.endpoint == 'paper_page' %}aria-current="page"{% endif %}>Paper Trading</a>
 <a href="{{ url_for('positions_page') }}" {% if request.endpoint == 'positions_page' %}aria-current="page"{% endif %}>Positions</a>
 <a href="{{ url_for('trade_records_page') }}" {% if request.endpoint == 'trade_records_page' %}aria-current="page"{% endif %}>Trade Records</a>

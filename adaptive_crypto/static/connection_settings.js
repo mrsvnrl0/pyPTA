@@ -4,9 +4,10 @@
   if (!forms.length) return;
   const edits = new Set();
   const saved = {};
+  const defaultModels = {deepseek:'deepseek-flash'};
   let editable = false, revision = 0, polling = false;
   const result = form => form.querySelector('[data-connection-result]');
-  const controls = () => forms.flatMap(form => Array.from(form.querySelectorAll('input, select, button')));
+  const controls = () => forms.flatMap(form => Array.from(form.querySelectorAll('input, select, textarea, button')));
   const ai = forms.find(form => form.dataset.connection === 'ai');
   function profile() {
     const selected = saved.ai?.profiles?.[ai.elements.provider.value] || {};
@@ -16,12 +17,19 @@
       : 'Enter a key for this provider. Keys are encrypted locally and excluded from backups.';
     return selected;
   }
+  function fillAIProfile() {
+    const selected = profile();
+    const defaultModel = defaultModels[ai.elements.provider.value] || '';
+    ai.elements.model.placeholder = defaultModel || 'Model ID from your provider account';
+    ai.elements.model.value = selected.model || defaultModel;
+    ai.elements.prompt.value = selected.prompt || saved.ai?.default_prompt || '';
+  }
   function fill(form) {
     const state = saved[form.dataset.connection] || {};
     form.querySelectorAll('input[type=password]').forEach(input => { input.value = ''; });
     if (form === ai) {
       form.elements.provider.value = state.provider || 'openai';
-      form.elements.model.value = profile().model || '';
+      fillAIProfile();
     } else {
       form.elements.bot_token.required = !state.has_token;
       form.elements.chat_id.required = !state.has_chat;
@@ -62,7 +70,7 @@
   ai.elements.provider.addEventListener('change', () => {
     // Never carry one provider's unsaved key into a request to another provider.
     ai.elements.api_key.value = '';
-    ai.elements.model.value = profile().model || '';
+    fillAIProfile();
   });
   async function refresh() {
     if (busy || polling || document.hidden) return;
@@ -89,12 +97,18 @@
     const outcome = result(form);
     outcome.classList.remove('danger');
     if (action === 'discard') { edits.delete(form); fill(form); outcome.textContent = 'Connection edits discarded.'; return; }
+    if (action === 'default-prompt' && form === ai) {
+      form.elements.prompt.value = saved.ai?.default_prompt || '';
+      edits.add(form);
+      outcome.textContent = 'Default prompt selected. Save AI connection to apply.';
+      return;
+    }
     if (!form.dispatchEvent(new CustomEvent('pypta:connection-action', {bubbles:true, cancelable:true}))) return;
     if (dirty || Array.from(edits).some(other => other !== form) || (action !== 'save' && edits.has(form))) {
       outcome.textContent = 'Save or discard your edits before checking or changing this connection.'; return;
     }
     const payload = {csrf_token:editor.elements.csrf_token.value};
-    if (action === 'save') form.querySelectorAll('input, select').forEach(input => { payload[input.name] = input.value; });
+    if (action === 'save') form.querySelectorAll('input, select, textarea').forEach(input => { payload[input.name] = input.value; });
     revision += 1;
     const unlock = lockControls();
     outcome.textContent = action === 'check' ? 'Checking credentials…' : 'Saving connection…';

@@ -18,15 +18,19 @@ def validate_holding_target(position):
         raise DataError("Invalid holding take-profit state")
     level = finite(target.get("liquidity_price"), "holding liquidity", 1e-15)
     price = finite(target.get("price"), "holding take-profit", 1e-15)
-    buffer = finite(target.get("sweep_buffer_bps"), "holding sweep buffer", 1e-15)
+    pine = (target.get("selection") or {}).get("source") == "pine_smc"
+    buffer = finite(target.get("sweep_buffer_bps"), "holding sweep buffer", 0 if pine else 1e-15)
+    if pine and buffer != 0:
+        raise DataError("Pine targets must preserve their exact liquidity level")
     validate_selection(target.get("selection"), level, position["side"])
     sign = 1 if position["side"] == "long" else -1
-    if (buffer > 100 or sign*(level-position["entry"]) <= 0 or sign*(price-level) <= 0
+    if (buffer > 100 or sign*(level-position["entry"]) <= 0 or (not pine and sign*(price-level) <= 0)
             or not isclose(price, level*(1+sign*buffer/10000), rel_tol=1e-12)):
         raise DataError("Holding take-profit does not match its recorded liquidity sweep")
+    setup_minutes = target.get("setup_minutes")
     if (type(target.get("selected_ms")) is not int or target["selected_ms"] < position["opened_ms"]
             or type(target.get("pivot_ms")) is not int or not 0 <= target["pivot_ms"] < target["selected_ms"]
-            or target.get("setup_minutes") not in {15, 30}):
+            or type(setup_minutes) is not int or setup_minutes not in {1, 5, 15, 30, 240}):
         raise DataError("Invalid holding take-profit chronology")
     if target["state"] == "reached":
         if type(target.get("reached_ms")) is not int or target["reached_ms"] < target["selected_ms"]:
@@ -41,7 +45,7 @@ def monitor_holding_targets(document, asset, symbol, high, low, quote, rules, no
         return
     quote = fresh_quote(quote, now) if not clock_error else None
     validated = []
-    for candles, interval in ((high, rules.smc_setup_minutes*60000), (low, rules.smc_entry_minutes*60000)):
+    for candles, interval in ((high, rules.smc_setup_minutes*60000), (low, 300000)):
         try:
             bars = validate_candles(candles, interval, now, 1, fresh=False) if not clock_error else []
         except (ValueError, TypeError):
@@ -49,6 +53,11 @@ def monitor_holding_targets(document, asset, symbol, high, low, quote, rules, no
         current = bool(bars) and bars[-1].t == (now//interval-1)*interval
         validated.append((bars, current))
     (high, current_high), (low, current_low) = validated
+    if (gex_context or {}).get("source") == "pine_smc":
+        from .pine_guidance import current_pine_history
+        selection_current = current_pine_history(gex_context.get("pine_structure"), high, now)
+    else:
+        selection_current = False
     for position in positions:
         event_id = target_event_id(position, "near-tp")
         if not monitored_position(position, rules.market_mode):
@@ -56,7 +65,7 @@ def monitor_holding_targets(document, asset, symbol, high, low, quote, rules, no
             cancel_near_alert(document, event_id, position["take_profit_error"])
             cancel_near_alert(document, target_event_id(position, "target-hit"), position["take_profit_error"])
             continue
-        if rules.strategy_model != "smc_video":
+        if (gex_context or {}).get("source") != "pine_smc":
             position["take_profit_error"] = "Sweep take-profit alerts are disabled."
             cancel_near_alert(document, event_id, position["take_profit_error"])
             cancel_near_alert(document, target_event_id(position, "target-hit"), position["take_profit_error"])
@@ -65,7 +74,7 @@ def monitor_holding_targets(document, asset, symbol, high, low, quote, rules, no
         mark = quote["bid" if long else "ask"] if quote else None
         target = position.get("take_profit")
         if target is None:
-            if not quote or not current_high or not current_low:
+            if not quote or not selection_current:
                 position["take_profit_error"] = "Waiting for current setup/entry candles and a fresh quote to select take-profit."
                 continue
             reference = max(position["entry"], mark) if long else min(position["entry"], mark)
@@ -74,9 +83,10 @@ def monitor_holding_targets(document, asset, symbol, high, low, quote, rules, no
             if point is None:
                 position["take_profit_error"] = "Waiting for an untaken opposing liquidity swing beyond entry and the current price."
                 continue
+            buffer = 0
             target = {"liquidity_price": point["price"], "pivot_ms": point["bar_ms"],
-                      "price": point["price"]*(1+(1 if long else -1)*rules.smc_tp_sweep_buffer_bps/10000),
-                      "sweep_buffer_bps": rules.smc_tp_sweep_buffer_bps,
+                      "price": point["price"]*(1+(1 if long else -1)*buffer/10000),
+                      "sweep_buffer_bps": buffer,
                       "selected_ms": now, "setup_minutes": rules.smc_setup_minutes,
                       "state": "watching", "reached_ms": None, "selection": point["target_selection"]}
             position["take_profit"] = target

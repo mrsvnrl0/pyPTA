@@ -11,11 +11,14 @@ import tempfile
 import threading
 
 from .core import DataError
-from .gex import NaiveGEX
+from .gex import DeribitGEX
 
 
 def protect_credentials(data, decrypt=False):
     """Use Windows DPAPI with its default current-user scope and no UI prompts."""
+    if os.name != "nt" and os.environ.get("PYPTA_CREDENTIAL_KEY"):
+        from .linux_credentials import protect
+        return protect(data, decrypt)
     if os.name != "nt":
         raise DataError("Saving Deribit credentials requires Windows. Use environment credentials on this system.")
     from ctypes import wintypes
@@ -68,10 +71,16 @@ class DeribitCredentials:
         except FileNotFoundError:
             client_id = self.environment.get("DERIBIT_CLIENT_ID", "")
             secret = self.environment.get("DERIBIT_CLIENT_SECRET", "")
+            source = "environment"
+            if not client_id and not secret:
+                from .project_keys import read_project_key
+                client_id = read_project_key(self.path.parent, "CLIENT_ID_DERIBIT.md")
+                secret = read_project_key(self.path.parent, "CLIENT_SECRET_DERIBIT.md")
+                source = "project keys"
             if not client_id and not secret:
                 return None, "public"
             try:
-                return _pair(client_id, secret), "environment"
+                return _pair(client_id, secret), source
             except DataError:
                 raise DataError("Deribit environment credentials are incomplete or invalid. Set both DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET, or save a local connection.") from None
         except OSError:
@@ -205,7 +214,7 @@ def register_deribit_routes(app, runtime, position_payload):
                 else:
                     runtime.deribit_credentials.save(payload["client_id"], payload["client_secret"])
                 runtime.deribit.invalidate()
-                runtime.gex = NaiveGEX(runtime.assets, provider=runtime.deribit.fetch)
+                runtime.gex = DeribitGEX(runtime.assets, provider=runtime.gex.provider)
                 runtime.wake.set()
             data = connection_status(runtime, request)
             data["message"] = "Public Deribit requests enabled." if public else "Connection saved. Authentication will be checked by the next options request."

@@ -2,11 +2,11 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings · pyPTA</title><link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='feed_status.css') }}"></head>
 <body><main class="settings-page">
-<header><div><div class="eyebrow">pyPTA</div><h1>Settings</h1><p class="muted">Currency pairs, NN simulation and SMC analysis</p></div>
+<header><div><div class="eyebrow">pyPTA</div><h1>Settings</h1><p class="muted">Currency pairs, combined paper strategy and SMC analysis</p></div>
 <div class="header-meta muted">Last scan {{ time(s.updated_ms) }}<br>Telegram: {{ 'configured' if s.telegram_configured else 'not configured' }}
 </div></header>
 {% include 'navigation.html' %}
-<p class="notice">Paper Trading runs the NN simulation. SMC settings tune the market measurements on Home and your position targets. These run together without selecting a strategy.</p>
+<p class="notice">Paper Trading combines Perky SMC entries with Parente 5/2 confirmation. The Perky SMC strategy section controls signal scoring, entry filters, cooldowns, stops and the chart timeframe.</p>
 {% include 'feed_status.html' %}
 {% include 'deribit_settings.html' %}
 {% include 'connection_settings.html' %}
@@ -14,7 +14,8 @@
 <form id="settings-form" action="{{ url_for('save_settings') }}" data-revision="{{ revision }}">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <section class="settings-card" aria-labelledby="pairs-title"><h2 id="pairs-title">Currency pairs</h2>
-<p class="muted">Use USD pairs, such as BTC/USD. The paper portfolio is denominated in USD. Disable a pair to keep its configuration for later.</p>
+<p class="muted">Choose any pair available on Deribit or Binance using BASE/QUOTE. Deribit is preferred; a pair absent from its market catalog uses Binance spot. Select Binance spot below to use it directly. Each pair keeps its own quote currency, so different quotes can be enabled together. The paper account holds USD cash; fresh exchange conversions translate its budgets and trading results without changing native prices. SMC, charts and new position prices and targets use the applied pair. Existing positions retain their recorded native prices and saved levels. Parente always reads its original Binance spot/USDT training inputs for the base asset, independently of this setting. DVOL has its own Deribit-only pairs section.</p>
+<p class="muted" id="active-market-pairs"><strong>Active SMC and GEX pairs:</strong> {% for name, cfg in (active_assets|default(s.market)).items() %}{{ cfg.symbol }}{{ ' · ' if not loop.last else '' }}{% endfor %}. Save edits, then choose Apply saved settings to switch every enabled asset and refresh its analysis.</p>
 <div id="asset-rows">
 {% for entry in document.assets %}
 <div class="asset-settings-row">
@@ -25,52 +26,41 @@
 <button type="button" class="secondary remove-asset" aria-label="Remove {{ entry.name }} pair">Remove</button>
 </div>{% endfor %}</div>
 <button type="button" class="secondary" id="add-asset">Add currency pair</button>
-<datalist id="pair-suggestions">{% for pair in ['BTC/USD','ETH/USD','SOL/USD','XRP/USD','ADA/USD','DOGE/USD','UNI/USD'] %}<option value="{{ pair }}"></option>{% endfor %}</datalist>
+<datalist id="pair-suggestions">{% for pair in ['BTC/USDC','ETH/USDC','SOL/USDC','BTC/USD','ETH/USD','XRP/USDC','BTC/EUR','ETH/BTC'] %}<option value="{{ pair }}"></option>{% endfor %}</datalist>
 </section>
 <section class="settings-card"><h2>Dashboard refresh</h2><div class="settings-grid"><label>Refresh interval (seconds)<input id="refresh-seconds" type="number" min="5" max="300" step="any" value="{{ document.refresh_seconds }}" required></label></div></section>
 <section class="settings-card" id="model-settings"><h2>Analysis and simulation settings</h2>
-<p class="muted">NN controls paper BUY / HOLD / SELL. SMC computes market entry levels and targets; GEX adds a separate supported TP2 for your actual positions. Earlier strategy histories remain available in Trade Records.</p>
-<p class="muted">Rates and risk values are fractions: 0.005 = 0.5%. Fields ending in bps use basis points. SMC timeframes must be 30/5 or 15/1 minutes. Leave the legacy NN model path empty to use the selected bundled model.</p>
-{% set saved_model_id = document.strategy.get('nn_model_id', 'parente_mlp_v1') %}
-{% set current_model_id = applied_model_id|default('parente_mlp_v1', true) %}
-{% set candidates = model_catalog|default([]) %}
-{% set saved_name = namespace(value=saved_model_id) %}{% set current_name = namespace(value=current_model_id) %}
-{% for candidate in candidates %}{% if candidate.id == saved_model_id %}{% set saved_name.value = candidate.label %}{% endif %}{% if candidate.id == current_model_id %}{% set current_name.value = candidate.label %}{% endif %}{% endfor %}
-<div class="nn-model-picker" aria-labelledby="nn-model-title">
-<h3 id="nn-model-title">NN model</h3>
-<p id="nn-model-help" class="muted">Select a trained model, save settings, then apply them below. The applied model supplies future Home, Paper Trading and Positions classifications, including exits for open paper positions. Existing recorded stops and costs stay with their trades.</p>
-<label for="nn-model-id">Model family and trained version</label>
-<select id="nn-model-id" data-rule="nn_model_id" data-kind="text" data-saved-model-id="{{ saved_model_id }}" data-applied-model-id="{{ current_model_id }}" aria-describedby="nn-model-help nn-model-state nn-model-detail">
-{% set selection = namespace(found=false) %}
-{% for candidate in candidates %}
-{% if candidate.id == saved_model_id %}{% set selection.found = true %}{% endif %}
-<option value="{{ candidate.id }}" {{ 'selected' if candidate.id == saved_model_id else '' }} {{ 'disabled' if not candidate.available and candidate.id != saved_model_id else '' }}>{{ candidate.label }} — {{ candidate.status|default('trained/validated' if candidate.available else 'unavailable') }}</option>
-{% endfor %}
-{% if not selection.found %}<option value="{{ saved_model_id }}" selected>{{ saved_model_id }} — registry status unavailable</option>{% endif %}
-</select>
-<p id="nn-model-state" class="nn-model-state" role="status" aria-live="polite">Saved: <strong>{{ saved_name.value }}</strong> · Applied: <strong>{{ current_name.value }}</strong>{% if saved_model_id != current_model_id %} · Apply saved settings to activate the saved model.{% endif %}</p>
-<div id="nn-model-detail" class="nn-model-detail" aria-live="polite"><p id="nn-model-availability"></p><p id="nn-model-coverage"></p><p id="nn-model-provenance"></p><a id="nn-model-report" hidden>Open validation report</a></div>
-<script id="nn-model-catalog" type="application/json">{{ candidates|tojson }}</script>
+<p class="muted">A qualified Perky SMC setup supplies the paper entry, configured stop and TP1–TP3. Parente BUY must confirm the entry. The recorded stop, TP3 or a later Parente SELL closes the paper position; TP1 and TP2 are intermediate levels. GEX can guide targets for existing positions.</p>
+<p class="muted">Paper equity, floor and minimum notional are USD. Rates and risk values are fractions: 0.005 = 0.5%. Fields ending in bps use basis points. Perky signals and the chart use the selected 1M, 5M, 15M, 30M or 4H timeframe.</p>
+<div class="nn-model-detail" aria-labelledby="nn-model-title">
+<h3 id="nn-model-title">Parente 5/2</h3>
+<p class="muted">Published trained model · 36 inputs → 128 → 64 → 32 → BUY / HOLD / SELL. Published weights, original feature scaler and frozen Binance base-volume calibration.</p>
+<p class="muted">NN inputs: Binance spot/USDT · completed 4H candles · base-asset volume. SMC, charts, position prices and targets use your selected market pair; this never changes the trained NN inputs.</p>
 </div>
 {% for group, fields in groups.items() %}
-<details class="settings-group" open><summary>{{ group }}</summary><div class="settings-grid">
-{% for field in fields %}{% if field.key != 'nn_model_id' %}<label{% if field.key == 'nn_limitations' %} id="nn-limitations"{% endif %}>{{ field.label }}<small>{{ field.key }}</small>
+<details class="settings-group" open><summary>{{ group }}</summary>
+{% if group=='Perky SMC strategy' %}<p class="muted">The default settings follow Perky SMC Ultimate V5 Filtered mode. Score components, pivot lengths, cooldown, stop calculation and optional entry gates below are applied to the same completed candles used by the SMC chart and paper strategy.</p>{% endif %}
+{% if group=='SMC target reachability' %}<p class="muted">Advisory mode shows structural support without changing trades or qualification. Require mode filters new entries and rechecks their execution price; it does not move saved targets or force-close positions. Daily candles aggregate six complete UTC 4H candles from the selected SMC pair and feed, independently of Parente. Missing history stays unavailable. With a 4H SMC chart, choose Daily bias. A 50% entry-depth limit means longs in discount and shorts in premium. ATR distance is a movement envelope, without a target deadline. Inside bars or a narrow configured range flag balance. Intermediate liquidity is competing context, without a probability boost.</p>{% endif %}
+<div class="settings-grid">
+{% for field in fields %}{% if field.key not in ['nn_model_id','strategy_model'] %}<label{% if field.key == 'nn_limitations' %} id="nn-limitations"{% endif %}>{{ field.label }}<small>{{ field.key }}</small>
 {% if field.key == 'nn_limitations' %}<input type="checkbox" class="nn-limitations-checkbox" data-rule="nn_limitations" data-kind="bool" aria-describedby="nn-limitations-help" {{ 'checked' if field.value else '' }}>
-<span id="nn-limitations-help" class="muted">On: one position per asset, risk limits and automatic stops. Off: each new 4H BUY uses all available paper cash, with no position-count, risk, allocation, spread or minimum-order cap and no new automatic stop. The first eligible BUY can use the whole balance. SELL closes all open positions for that asset. Existing trades keep their stops and costs. Save and apply settings to activate.</span>
+<span id="nn-limitations-help" class="muted">On: apply the paper allocation, risk, spread, minimum-order and position-count limits. Off: use available paper cash without those limits. Every automatic entry still requires a qualified Perky plan and Parente BUY. Its recorded stop and TP3 remain active. Save and apply settings to activate.</span>
 {% elif field.choices %}<select data-rule="{{ field.key }}" data-kind="{{ field.kind }}">{% for value, label in field.choices %}<option value="{{ value }}" {{ 'selected' if value == field.value else '' }}>{{ label }}</option>{% endfor %}</select>
 {% elif field.kind == 'bool' %}<select data-rule="{{ field.key }}" data-kind="bool"><option value="true" {{ 'selected' if field.value else '' }}>Enabled</option><option value="false" {{ 'selected' if not field.value else '' }}>Disabled</option></select>
 {% else %}<input data-rule="{{ field.key }}" data-kind="{{ field.kind }}" type="{{ 'text' if field.kind == 'text' else 'number' }}" {% if field.kind != 'text' %}step="{{ '1' if field.kind == 'int' else 'any' }}" required{% endif %} value="{{ field.value }}">{% endif %}
+{% if field.key == "smc_min_exit_distance_pct" %}<span class="muted">3 means 3%; 0 disables this filter. New Perky plans are filtered using TP3 as the final exit target. Reachability is assessed separately below; this distance filter does not move saved targets.</span>{% endif %}
 </label>{% endif %}{% endfor %}</div></details>{% endfor %}</section>
 <div class="settings-save-bar"><div class="form-actions"><button type="submit">Save settings</button><button type="reset" class="secondary">Discard unsaved edits</button><span id="unsaved-status" class="muted">No unsaved edits</span></div>
 <p id="settings-result" role="status" aria-live="polite"></p></div>
 </form>
+{% include 'dvol_settings.html' %}
 {% include 'strategy_controls.html' %}
 {% include 'restore_controls.html' %}
 <section class="settings-card" id="restart-controls"><h2>Restart dashboard</h2>
-<p class="muted">Reload saved settings and the NN paper simulation and market analysis. Current scans and alert deliveries finish before monitoring restarts. Saved balances and history are retained.</p>
+<p class="muted">Reload saved settings, the combined SMC + Parente paper strategy and market analysis. Current scans and alert deliveries finish before monitoring restarts. Saved balances and history are retained.</p>
 <form id="restart-form" method="post" action="{{ url_for('restart_dashboard') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" {% if not restart_available %}disabled{% endif %}>Restart dashboard</button></form>
 {% if not restart_available %}<p class="muted">Launch pyPTA through the dashboard launcher to enable restart.</p>{% endif %}
 <p id="restart-result" role="status" aria-live="polite"></p>
 </section>
 {% include 'page_footer.html' %}
-</main><script src="{{ url_for('static', filename='settings.js') }}" defer></script><script src="{{ url_for('static', filename='deribit_settings.js') }}" defer></script><script src="{{ url_for('static', filename='connection_settings.js') }}" defer></script><script src="{{ url_for('static', filename='restore.js') }}" defer></script><script src="{{ url_for('static', filename='feed_status.js') }}" defer></script></body></html>
+</main><script src="{{ url_for('static', filename='settings.js') }}" defer></script><script src="{{ url_for('static', filename='dvol_settings.js') }}" defer></script><script src="{{ url_for('static', filename='deribit_settings.js') }}" defer></script><script src="{{ url_for('static', filename='connection_settings.js') }}" defer></script><script src="{{ url_for('static', filename='restore.js') }}" defer></script><script src="{{ url_for('static', filename='feed_status.js') }}" defer></script></body></html>

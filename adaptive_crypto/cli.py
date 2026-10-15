@@ -19,7 +19,7 @@ BASE = Path(__file__).resolve().parent.parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--settings", type=Path, default=BASE/"adaptive_crypto_settings.json")
-    parser.add_argument("--state", type=Path, default=BASE/"adaptive_crypto_reclaim_state.json")
+    parser.add_argument("--state", type=Path, default=BASE/"adaptive_crypto_state.json")
     parser.add_argument("--state-backend", choices=("auto", "json", "sqlite"), default="auto")
     parser.add_argument("--once", action="store_true", help="Scan public market data once; no AI or Telegram calls")
     parser.add_argument("--host", default=os.getenv("DASHBOARD_HOST", "127.0.0.1"))
@@ -75,6 +75,10 @@ def _run(args, assets, rules, refresh, store, holdings):
             runtime.market_brief.wake.set()
         for thread in threads:
             thread.join()
+        if runtime and hasattr(runtime.provider, "close"):
+            runtime.provider.close()
+        if runtime and getattr(runtime, "neural_feature_provider", None) is not None:
+            runtime.neural_feature_provider.close()
         if server:
             server.server_close()
     return restarting.is_set()

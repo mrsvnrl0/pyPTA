@@ -7,10 +7,10 @@ import uuid
 from math import isclose
 
 from .core import DataError, finite, normalise_pair, utc, validate_candles
-from .ledger import queue_event
-from .smc import structure_readings
+from .storage import queue_event
 from .gex_targets import select_target, validate_selection, validate_target_mode, rules_for_target
 from .take_profit_alerts import fresh_quote
+from .position_alerts import price, native_quote
 
 
 def validate_buy_watches(document):
@@ -29,7 +29,8 @@ def validate_buy_watches(document):
                 raise DataError("Invalid buy watch identity")
             seen.add(value)
         if (not isinstance(watch.get("asset"), str) or not watch["asset"].isalnum()
-                or normalise_pair(watch["symbol"]) != watch["symbol"] or not watch["symbol"].endswith("/USD")
+                or normalise_pair(watch.get("symbol", "")) != watch["symbol"]
+                or watch["asset"] != watch["symbol"].split("/")[0]
                 or watch.get("status") not in {"watching", "reached", "missed", "cancelled"}):
             raise DataError("Invalid buy watch type")
         reference = finite(watch.get("reference_price"), "watch reference", 1e-15)
@@ -44,7 +45,10 @@ def validate_buy_watches(document):
             raise DataError("Manual buy level does not match the saved request")
         if watch.get("target_source") == "sweep":
             level = finite(watch.get("liquidity_price"), "buy liquidity low", 1e-15)
-            buffer = finite(watch.get("sweep_buffer_bps"), "buy sweep buffer", 1e-15)
+            pine = (watch.get("target_selection") or {}).get("source") == "pine_smc"
+            buffer = finite(watch.get("sweep_buffer_bps"), "buy sweep buffer", 0 if pine else 1e-15)
+            if pine and buffer != 0:
+                raise DataError("Pine buy levels must preserve their exact liquidity level")
             validate_selection(watch.get("target_selection"), level, "short")
             if buffer > 100 or not isclose(watch["buy_price"], level*(1-buffer/10000), rel_tol=1e-12):
                 raise DataError("Buy level does not match its saved liquidity sweep")
@@ -114,12 +118,13 @@ def watch_alert(document, watch, kind, quote, now, reading=None):
     buying = kind == "buy"
     action = "BUY SPOT · BUY LEVEL REACHED" if buying else "BEARISH MOMENTUM · WAIT TO BUY"
     title = f"{watch['asset']} #{watch['id'][:8]} · {action}"
-    target = f"${watch['buy_price']:,.8f}" if watch["buy_price"] is not None else "Waiting for an untaken liquidity low"
+    currency = native_quote(watch["symbol"])
+    target = price(watch["buy_price"], currency) if watch["buy_price"] is not None else "Waiting for an untaken liquidity low"
     lines = [title, f"SHORT buy watch · {watch['symbol']} · no asset purchase recorded",
-             f"Watch reference: ${watch['reference_price']:,.8f}", f"Spot buy level: {target}",
+             f"Watch reference: {price(watch['reference_price'], currency)}", f"Spot buy level: {target}",
              f"Planned quantity: {watch['quantity']:.8g} {watch['asset']}"]
     if quote:
-        lines.extend([f"Current buy quote (ask): ${quote['ask']:,.8f}", f"Quote observed: {utc(quote['asof_ms'])}"])
+        lines.extend([f"Current buy quote (ask): {price(quote['ask'], currency)}", f"Quote observed: {utc(quote['asof_ms'])}"])
     if buying:
         lines.append("The observed ask is at or below your buy level. Record a Spot buy holding only after your actual purchase. No exchange order is submitted.")
     else:
@@ -141,7 +146,7 @@ def watch_alert(document, watch, kind, quote, now, reading=None):
                     scope="buy_watch", asset=watch["asset"], side="long", direction=watch["direction"],
                     position_ids=[], buy_watch_ids=[watch["id"]], observed_ms=now, expires_ms=expires,
                     candle_ms=reading["bar_ms"] if reading else None,
-                    summary=f"{action} · Buy level {target} · Reference ${watch['reference_price']:,.8f}")
+                    summary=f"{action} · Buy level {target} · Reference {price(watch['reference_price'], currency)}")
 
 
 def monitor_buy_watches(document, asset, symbol, high, low, quote, rules, now, clock_error=None, gex_context=None):
@@ -151,32 +156,44 @@ def monitor_buy_watches(document, asset, symbol, high, low, quote, rules, now, c
         return
     quote = fresh_quote(quote, now) if not clock_error else None
     validated = []
-    for bars, interval in ((high, rules.smc_setup_minutes*60000), (low, rules.smc_entry_minutes*60000)):
+    for bars, interval in ((high, rules.smc_setup_minutes*60000), (low, 300000)):
         try:
             bars = validate_candles(bars, interval, now, 1, fresh=False) if not clock_error else []
         except (ValueError, TypeError):
             bars = []
         validated.append(bars if bars and bars[-1].t == (now//interval-1)*interval else [])
     high, low = validated
-    readings = structure_readings(low, rules.smc_pivot_strength) if low and rules.strategy_model == "smc_video" else []
-    rules_key = f"buy-watch-structure:{rules.strategy_model}:{rules.smc_entry_minutes}:{rules.smc_pivot_strength}"
+    pine = (gex_context or {}).get("source") == "pine_smc"
+    structure = (gex_context or {}).get("pine_structure") or {}
+    readings = []
+    selection_current = bool(high and low)
+    if pine:
+        from .pine_guidance import current_pine_history
+        selection_current = not clock_error and current_pine_history(structure, high, now)
+        interval = structure.get("interval_ms", rules.smc_setup_minutes*60000)
+        if selection_current:
+            readings = [{"bar_ms": structure["last_bar_ms"], "end_ms": structure["last_closed_ms"],
+                         "interval_ms": interval, "direction": structure["regime"],
+                         "close": structure["close"], "event": True}]
+    rules_key = "buy-watch:pine_smc"
     for watch in watches:
         event_id = f"buy-watch:{watch['id']}:buy"
-        if rules.market_mode != "spot" or rules.strategy_model != "smc_video":
+        if rules.market_mode != "spot" or not pine:
             watch["error"] = "Buy watch paused: requires the SMC strategy in spot mode."
             for event in document["outbox"]:
                 if watch["id"] in event.get("buy_watch_ids", []):
                     cancel_alert(document, event["id"], watch["error"])
             continue
         current_quote = quote if quote and quote["asof_ms"] >= watch["created_ms"] else None
-        if watch["buy_price"] is None and current_quote and high and low:
+        if watch["buy_price"] is None and current_quote and selection_current:
             buy_rules = rules_for_target(rules, watch.get("target_mode", "smc"))
             point = select_target(high, low, buy_rules, "short",
                                   min(watch["reference_price"], current_quote["ask"]), now, gex_context)
             if point:
-                watch.update(buy_price=point["price"]*(1-rules.smc_tp_sweep_buffer_bps/10000),
+                buffer = 0
+                watch.update(buy_price=point["price"]*(1-buffer/10000),
                              target_source="sweep", liquidity_price=point["price"], pivot_ms=point["bar_ms"],
-                             sweep_buffer_bps=rules.smc_tp_sweep_buffer_bps, selected_ms=now,
+                             sweep_buffer_bps=buffer, selected_ms=now,
                              target_selection=point["target_selection"])
         watch["error"] = ("Waiting for a fresh ask quote." if not current_quote else
                           "Waiting for current candles and an untaken liquidity low below the reference and price." if watch["buy_price"] is None else None)

@@ -29,7 +29,7 @@ def backup_scope(base, settings=None):
 
 def state_base(path):
     path = Path(path).resolve()
-    for suffix in (".smc.json", ".neural.json", ".positions.json"):
+    for suffix in (".neural.json", ".positions.json"):
         if path.name.endswith(suffix):
             return path.with_name(path.name[:-len(suffix)]+".json")
     return path
@@ -49,7 +49,7 @@ def create_backup(base, *, settings=None, database=None, sources=None, documents
 
     Callers hold state ownership and any live store locks. SQLite is copied with
     its online backup API under the coordinator lock, including committed WAL.
-    Explicit sources preserve original import/upgrade bytes, even when damaged.
+    Explicit sources preserve current import bytes, even when damaged.
     Only latest.zip is replaced; unrelated or historical files are never deleted.
     """
     from .state_paths import StatePaths

@@ -2,67 +2,13 @@
 const editor = document.getElementById('settings-form');
 const result = document.getElementById('settings-result');
 const unsaved = document.getElementById('unsaved-status');
-const modelSelect = document.getElementById('nn-model-id');
-let modelCatalog = [];
-try { modelCatalog = JSON.parse(document.getElementById('nn-model-catalog')?.textContent || '[]'); }
-catch (_) { modelCatalog = []; }
-if (!Array.isArray(modelCatalog)) modelCatalog = [];
-const modelEntry = id => modelCatalog.find(entry => entry && entry.id === id);
-const modelName = id => modelEntry(id)?.label || id;
-function modelReportHref(value) {
-  if (typeof value !== 'string' || !value.startsWith('/')) return null;
-  try {
-    const url = new URL(value, window.location.origin);
-    return url.origin === window.location.origin && ['http:', 'https:'].includes(url.protocol)
-      ? url.pathname + url.search + url.hash : null;
-  } catch (_) { return null; }
+let savedStrategy = {};
+try { savedStrategy = JSON.parse(document.getElementById('saved-strategy')?.textContent || '{}'); }
+catch (_) { savedStrategy = {}; }
+if (!savedStrategy || typeof savedStrategy !== 'object' || Array.isArray(savedStrategy)) savedStrategy = {};
+function ruleInputs() {
+  return editor ? Array.from(editor.querySelectorAll('[data-rule]')) : [];
 }
-function modelCoverage(value) {
-  if (Array.isArray(value)) return value.length ? value.join(', ') : 'No assets reported';
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value);
-    return entries.length ? entries.map(([asset, status]) => {
-      if (typeof status === 'boolean') return status ? asset : `${asset} unavailable`;
-      if (status && typeof status === 'object') return `${asset}: ${status.available === false ? 'unavailable' : status.status || 'supported'}`;
-      return `${asset}: ${status}`;
-    }).join(', ') : 'No assets reported';
-  }
-  return typeof value === 'string' && value ? value : 'Not reported';
-}
-function renderModelDetails() {
-  if (!modelSelect) return;
-  const selectedId = modelSelect.value;
-  const candidate = modelEntry(selectedId);
-  const savedId = modelSelect.dataset.savedModelId || selectedId;
-  const appliedId = modelSelect.dataset.appliedModelId || savedId;
-  document.getElementById('nn-model-state').textContent = `Selected: ${modelName(selectedId)} · Saved: ${modelName(savedId)} · Applied: ${modelName(appliedId)}`
-    + (savedId !== appliedId ? ' · Apply saved settings to activate the saved model.' : '');
-  const availabilityStatus = candidate?.status || (candidate?.available ? 'Trained and validated' : 'Unavailable');
-  const availabilityReason = typeof candidate?.reason === 'string' ? candidate.reason.trim() : '';
-  document.getElementById('nn-model-availability').textContent = candidate
-    ? `${availabilityStatus}${availabilityReason && availabilityReason.toLowerCase() !== availabilityStatus.toLowerCase()
-      ? ` · ${availabilityReason}` : ''}`
-    : 'Registry status unavailable for this model.';
-  document.getElementById('nn-model-coverage').textContent = `Asset coverage: ${modelCoverage(candidate?.coverage)}`;
-  const stamp = value => {
-    const ms = Number(value);
-    const date = new Date(ms);
-    return Number.isFinite(ms) && ms > 0 && Number.isFinite(date.getTime())
-      ? date.toISOString().replace('Z', ' UTC') : 'not reported';
-  };
-  const horizon = candidate?.target_horizon ? ` · Target horizon: ${candidate.target_horizon} completed 4H bars` : '';
-  const artifact = candidate?.artifact_id ? ` · Artifact: ${candidate.artifact_id}` : '';
-  const eligibility = candidate?.live_eligibility_after_ms != null
-    ? ` · Live eligible after: ${stamp(candidate.live_eligibility_after_ms)}` : '';
-  document.getElementById('nn-model-provenance').textContent = `Training/calibration through: ${stamp(candidate?.trained_through_ms)}${eligibility}${horizon}${artifact}`;
-  const report = document.getElementById('nn-model-report');
-  const href = modelReportHref(candidate?.report_url);
-  report.hidden = !href;
-  if (href) report.href = href;
-  else report.removeAttribute('href');
-}
-modelSelect?.addEventListener('change', renderModelDetails);
-renderModelDetails();
 let dirty = false;
 let busy = false;
 function markDirty(value = true) {
@@ -96,25 +42,23 @@ editor.addEventListener('reset', () => {
   rows.innerHTML = savedRows;
   markDirty(false);
   result.textContent = 'Unsaved edits discarded.';
-  // The browser restores select values after dispatching the reset event.
-  setTimeout(renderModelDetails, 0);
 });
 function readValue(input) {
   if (input.type === 'checkbox') return input.checked;
   if (input.dataset.kind === 'bool' || input.dataset.assetField === 'enabled') return input.value === 'true';
   if (['int', 'number'].includes(input.dataset.kind) || input.dataset.assetField === 'price_decimals') return Number(input.value);
-  return input.value;
+  return input.dataset.assetField === 'symbol' || input.dataset.assetField === 'name' ? input.value.trim().toUpperCase() : input.value;
 }
 function settingsDocument() {
   return {
     assets: Array.from(rows.children, row => Object.fromEntries(Array.from(row.querySelectorAll('[data-asset-field]'), input => [input.dataset.assetField, readValue(input)]))),
     refresh_seconds: Number(document.getElementById('refresh-seconds').value),
-    strategy: {...JSON.parse(document.getElementById('saved-strategy').textContent), ...Object.fromEntries(Array.from(editor.querySelectorAll('[data-rule]'), input => [input.dataset.rule, readValue(input)])), strategy_model:'neural_network'},
+    strategy: {...savedStrategy, ...Object.fromEntries(ruleInputs().map(input => [input.dataset.rule, readValue(input)])), nn_model_id:'parente_mlp_v1', strategy_model:'neural_network'},
   };
 }
 function lockControls() {
   busy = true;
-  const controls = Array.from(document.querySelectorAll('input, select, button')).filter(control => !control.disabled);
+  const controls = Array.from(document.querySelectorAll('input, select, textarea, button')).filter(control => !control.disabled);
   controls.forEach(control => { control.disabled = true; });
   return () => { busy = false; controls.forEach(control => { control.disabled = false; }); };
 }
@@ -140,8 +84,9 @@ editor.addEventListener('submit', async event => {
     editor.dataset.revision = data.revision;
     editor.querySelectorAll('input').forEach(input => { input.defaultValue = input.value; if (input.type === 'checkbox') input.defaultChecked = input.checked; });
     editor.querySelectorAll('select').forEach(select => Array.from(select.options).forEach(option => { option.defaultSelected = option.selected; }));
-    if (modelSelect) modelSelect.dataset.savedModelId = modelSelect.value;
-    renderModelDetails();
+    savedStrategy = payload.settings.strategy;
+    const baseline = document.getElementById('saved-strategy');
+    if (baseline) baseline.textContent = JSON.stringify(savedStrategy);
     // Capture the enabled controls after unlocking, so discard never restores disabled fields.
     markDirty(false);
     result.textContent = data.message;

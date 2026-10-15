@@ -14,7 +14,7 @@ def prepare(root: Path, destination: Path) -> Path:
     sources = collect_sources(root)
     destination = Path(destination).absolute()
     # Refuse any existing destination, including a link. Never delete a build
-    # tree or copy from the machine's separate legacy installer workspace.
+    # tree or copy from the machine's separate installer workspace.
     destination.mkdir(parents=True, exist_ok=False)
     for name, data in sources.items():
         target = destination / name

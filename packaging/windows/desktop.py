@@ -16,15 +16,14 @@ import threading
 import time
 import webbrowser
 
-APP_ID = "AdaptiveCryptoDashboard.Windows.1"
+APP_ID = "pyPTA.SMCParente.Windows.1"
 APP_NAME = "pyPTA"
 SECRET_NAMES = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "OPENAI_API_KEY", "OPENAI_MODEL")
 
 
 def data_directory():
     root = Path(os.environ["LOCALAPPDATA"])
-    previous = root/"AdaptiveCryptoDashboard"/"data"
-    return previous if previous.exists() else root/"pyPTA"
+    return root/"pyPTA"/"SMCParente"
 
 
 def initialize(directory):
@@ -124,7 +123,7 @@ class DesktopService:
         self.ready = threading.Event()
         self.runtime = self.server = None
         self.url = None
-        self.status = "Starting dashboard…"
+        self.status = "Starting dashboardâ€¦"
         self.error = None
         self.thread = threading.Thread(target=self.run, name="desktop-server")
 
@@ -144,12 +143,12 @@ class DesktopService:
         from .runtime import DashboardRuntime
         from .web import create_app
         from .notifications import worker
-        from .ledger import atomic_json
+        from .storage import atomic_json
         try:
             while not self.exit.is_set():
                 apply_connections(self.directory)
                 settings = initialize(self.directory)
-                state = self.directory/"adaptive_crypto_reclaim_state.json"
+                state = self.directory/"adaptive_crypto_state.json"
                 from .restore import recover_pending_restore
                 recover_pending_restore(state, settings)
                 assets, rules, refresh = load_settings(settings)
@@ -160,7 +159,7 @@ class DesktopService:
                     restarting = threading.Event()
                     def restart():
                         restarting.set()
-                        self.status = "Restarting dashboard…"
+                        self.status = "Restarting dashboardâ€¦"
                         threading.Timer(0.5, self.server.shutdown).start()
                     app = create_app(runtime, restart_callback=restart)
                     token = secrets.token_urlsafe(32)
@@ -255,7 +254,7 @@ def launch_window(service, directory, no_browser=False):
     def close():
         nonlocal closing
         closing = True
-        status.set("Stopping; finishing current scans and saving records…")
+        status.set("Stopping; finishing current scans and saving recordsâ€¦")
         service.shutdown()
     def poll():
         nonlocal opened
@@ -281,9 +280,7 @@ def launch_window(service, directory, no_browser=False):
 def self_test(report):
     import tkinter
     import numpy as np
-    import h5py
     import talib
-    import openai
     import certifi
     from .core import Candle, load_settings
     from .neural import NeuralModel
@@ -312,7 +309,7 @@ def self_test(report):
                           "/static/dashboard.css","/static/dashboard.js","/static/gex.js"):
                 assert client.get(route).status_code == 200,route
             html = client.get("/").get_data(as_text=True)
-            assert "pyPTA - Neural Network" in html
+            assert "Market Dashboard" in html and "Parente 5/2" in html
             assert "EternuLL Organisation" in html
             document, revision = read_editor(runtime)
             original = settings.read_bytes()
@@ -381,7 +378,7 @@ def main(argv=None):
         kernel.CreateMutexW.argtypes = [ctypes.c_void_p,ctypes.c_int,ctypes.c_wchar_p]
         kernel.CreateMutexW.restype = ctypes.c_void_p
         kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-        mutex = kernel.CreateMutexW(None,False,"Local\\AdaptiveCryptoDashboard.Installed")
+        mutex = kernel.CreateMutexW(None,False,"Local\\pyPTA.SMCParente.Installed")
     log = RotatingFileHandler(directory/"dashboard.log",maxBytes=2_000_000,backupCount=3,encoding="utf-8")
     logging.basicConfig(level=logging.INFO,handlers=[log],format="%(asctime)s %(levelname)s %(message)s",force=True)
     if sys.stdout is None:

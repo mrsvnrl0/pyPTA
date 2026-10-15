@@ -71,6 +71,25 @@ def ai_comment(event, config=None):
         return {"status": "failed", "error": "AI commentary failed. Check the selected provider, model and connection."}
 
 
+def _paper_entry_invalid(document, event, now):
+    """The queued snapshot explains an entry; current state admits delivery."""
+    if event.get("alert_type") != "paper_entry":
+        return None
+    row = document.get("assets", {}).get(event.get("asset"), {})
+    trade = next((t for t in row.get("trades", [])
+                  if t.get("id") == event.get("trade_id")), None)
+    if trade is None:
+        return "Paper entry removed before delivery."
+    if trade.get("status") != "active":
+        return "Paper entry closed before delivery."
+    if trade.get("symbol") != event.get("symbol"):
+        return "Paper entry pair changed before delivery."
+    expires = event.get("valid_until_ms", event.get("expires_ms"))
+    if type(expires) is not int or now >= expires:
+        return "Paper entry decision or SMC setup expired before delivery."
+    return None
+
+
 def dispatch_once(store, kind, sender, now=None):
     gate = getattr(store, "activity_gate", None)
     with gate.activity() if gate else nullcontext():
@@ -78,12 +97,17 @@ def dispatch_once(store, kind, sender, now=None):
 
 
 def _dispatch_once(store, kind, sender, now=None):
+    explicit_now = now is not None
     now = int(time.time()*1000) if now is None else now
     preference_store = getattr(store, "paper_alert_store", None)
     preferences = preference_store.snapshot().get("paper_alert_preferences", {}) if preference_store else {}
     def claim(document):
         positions = {p["id"]: p for p in document.get("positions", [])}
         for event in document["outbox"]:
+            if event["kind"] == kind and event["status"] == "queued":
+                invalid = _paper_entry_invalid(document, event, now)
+                if invalid:
+                    event.update(status="cancelled", error=invalid)
             if event["status"] == "queued" and event.get("retired"):
                 event.update(status="cancelled", error=event.get("error") or "Retired alert cannot be delivered.")
             if event["status"] == "queued" and preferences and not paper_alert_allowed(document, event, preferences, store.paper_namespace):
@@ -103,18 +127,34 @@ def _dispatch_once(store, kind, sender, now=None):
         return copy.deepcopy(event)
     # Avoid disk writes on an idle worker.
     if not any(e["kind"] == kind and e["status"] == "queued" and
-               (e["retry_ms"] <= now or e.get("expires_ms", now+1) <= now) for e in store.snapshot()["outbox"]):
+               (e["retry_ms"] <= now or e.get("expires_ms", now+1) <= now
+                or e.get("alert_type") == "paper_entry") for e in store.snapshot()["outbox"]):
         return False
     event = store.transaction(claim)
     if event is None:
+        return False
+    # Recheck immediately before the external request, without holding the
+    # ledger lock across network I/O. Keep the queued payload immutable.
+    def admit(document):
+        current = next((e for e in document["outbox"] if e["id"] == event["id"]), None)
+        if current is None or current["status"] != "running":
+            return False
+        delivery_now = now if explicit_now else int(time.time()*1000)
+        invalid = _paper_entry_invalid(document, current, delivery_now)
+        if invalid:
+            current.update(status="cancelled", error=invalid)
+            return False
+        return True
+    if not store.transaction(admit):
         return False
     try:
         result = sender(event)
     except Exception as exc:
         result = {"status": "uncertain" if kind == "telegram" else "failed", "error": safe_error(exc)}
     def finish(document):
-        current = next(e for e in document["outbox"] if e["id"] == event["id"])
-        current.update(result)
+        current = next((e for e in document["outbox"] if e["id"] == event["id"]), None)
+        if current is not None and current["status"] == "running":
+            current.update(result)
     store.transaction(finish)
     return True
 

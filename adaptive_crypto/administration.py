@@ -9,12 +9,9 @@ import uuid
 
 from .core import DataError, Rules, load_settings
 from .backups import backup_runtime
-from .gex import NaiveGEX
-from .ledger import new_state, validate_state
+from .gex import DeribitGEX
 from .persistence import SQLiteDocument
-from .positions import prepare_positions, validate_positions
-from .smc_engine import SMCEngine
-from .smc_ledger import SMCStore, prepare_smc, validate as validate_smc
+from .positions import prepare_positions, validate_positions, validate_monitored_pairs
 
 
 class ActivityGate:
@@ -109,6 +106,7 @@ def _finish(runtime, message, backup):
     runtime.market = {}
     runtime.feed_observations = {}
     runtime.chart_fallback = {}
+    runtime.pine_charts = {}
     runtime.position_errors = {}
     runtime.updated_ms = None
     runtime.error = None
@@ -120,47 +118,11 @@ def _finish(runtime, message, backup):
 def apply_settings(runtime, generation):
     with runtime.activity_gate.maintenance(), runtime.lock, runtime.store.lock, runtime.positions.lock:
         _check(runtime, generation)
-        if not runtime.settings_path.is_file():
-            raise DataError(f"Settings file does not exist: {runtime.settings_path}")
         assets, rules, refresh = load_settings(runtime.settings_path)
-        if rules.strategy_model != runtime.rules.strategy_model:
-            raise DataError("Changing strategy_model requires a dashboard restart. Other settings can be applied here.")
-        if runtime.is_neural:
-            return _apply_neural(runtime, assets, rules, refresh)
-        if rules.base_strategy == "legacy":
-            return _apply_legacy(runtime, assets, rules, refresh)
-        documents, contexts = _documents(runtime)
-        previous_contexts = copy.deepcopy(contexts)
-        proposed = copy.deepcopy(documents)
-        paper = proposed["smc"]
-        for name, cfg in assets.items():
-            record = paper["assets"].get(name)
-            if record and record["symbol"] != cfg["symbol"]:
-                if record["trades"] or record["pending"]:
-                    raise DataError(f"Purge the database before changing {name}'s pair.")
-                paper["assets"][name] = SMCStore._record(cfg["symbol"])
-        proposed["smc"], _ = prepare_smc(json.dumps(paper).encode(), assets, rules)
-        proposed["positions"], _ = prepare_positions(json.dumps(proposed["positions"]).encode(), rules.market_mode)
-        # Old pending messages must not be delivered using newly applied settings.
-        for document in (proposed["smc"], proposed["positions"]):
-            for event in document["outbox"]:
-                if event["status"] == "queued":
-                    event.update(status="cancelled", error="Settings applied; waiting for fresh evidence.")
-        # A purged ledger starts with the equity from the newly edited file.
-        if runtime.paused:
-            proposed["smc"], _ = prepare_smc(None, assets, rules)
-        contexts["smc"] = {"assets": assets, "rules": asdict(rules)}
-        contexts["positions"] = {"market_mode": rules.market_mode}
-        engine = SMCEngine(assets, rules, runtime.store)
-        gex = NaiveGEX(assets, provider=runtime.gex.provider)
-        backup = _backup(runtime, "settings", documents, previous_contexts)
-        _save(runtime, proposed, contexts, backup)
-        runtime.assets, runtime.rules, runtime.refresh = assets, rules, refresh
-        runtime.high_interval, runtime.low_interval = rules.smc_setup_minutes*60000, rules.smc_entry_minutes*60000
-        runtime.engine, runtime.gex = engine, gex
-        runtime.positions.market_mode = rules.market_mode
-        runtime.paused = False
-        return _finish(runtime, "Settings applied. Monitoring is running with the saved JSON settings.", backup)
+        from .settings_editor import validate_provider_pairs
+        validate_provider_pairs(runtime.provider, assets, rules)
+        from dataclasses import replace
+        return _apply_neural(runtime, assets, replace(rules, strategy_model="neural_network"), refresh)
 
 
 def purge_database(runtime, generation):
@@ -172,27 +134,15 @@ def purge_database(runtime, generation):
             context = contexts[name]
             if name == "positions":
                 proposed[name], _ = prepare_positions(None, runtime.rules.market_mode)
-            elif name == "smc":
-                proposed[name], _ = prepare_smc(None, context["assets"], Rules(**context["rules"]))
-            elif name == "legacy":
-                rules = Rules(**context["rules"])
-                proposed[name] = new_state(context["assets"], rules)
-                validate_state(proposed[name], context["assets"], rules)
             elif name == "neural":
                 from .neural_ledger import prepare_neural
                 proposed[name], _ = prepare_neural(None, context["assets"], Rules(**context["rules"]))
             else:
                 raise DataError(f"Cannot purge unknown database section: {name}")
-        namespace = runtime.rules.paper_namespace
-        if runtime.is_neural:
-            from .neural_ledger import validate as validate_neural
-            validate_neural(proposed[namespace])
-        elif namespace == "smc":
-            validate_smc(proposed[namespace])
-        else:
-            validate_state(proposed[namespace], runtime.assets, runtime.rules)
+        from .neural_ledger import validate as validate_neural
+        validate_neural(proposed["neural"])
         validate_positions(proposed["positions"])
-        proposed[namespace]["monitoring_paused"] = True
+        proposed["neural"]["monitoring_paused"] = True
         backup = _backup(runtime, "purge", documents, contexts)
         _save(runtime, proposed, contexts, backup)
         runtime.paused = True
@@ -200,12 +150,12 @@ def purge_database(runtime, generation):
 
 
 def _apply_neural(runtime, assets, rules, refresh):
-    from pathlib import Path
     from .neural_engine import NeuralEngine
     from .neural_ledger import prepare_neural
     documents, contexts = _documents(runtime)
     previous_contexts = copy.deepcopy(contexts)
     proposed = copy.deepcopy(documents)
+    validate_monitored_pairs(proposed["positions"], assets)
     proposed["neural"], _ = prepare_neural(None if runtime.paused else json.dumps(proposed["neural"]).encode(), assets, rules)
     proposed["positions"], _ = prepare_positions(json.dumps(proposed["positions"]).encode(), rules.market_mode)
     proposed["neural"].pop("monitoring_paused", None)
@@ -213,11 +163,9 @@ def _apply_neural(runtime, assets, rules, refresh):
         for event in document["outbox"]:
             if event["status"] == "queued":
                 event.update(status="cancelled", error="Settings applied; waiting for fresh evidence.")
-    path = Path(rules.nn_model_path) if rules.nn_model_path else None
-    if path is not None and not path.is_absolute():
-        path = runtime.settings_path.parent/path
-    engine = NeuralEngine(assets, rules, runtime.store, model_path=path,
-                          settings_path=runtime.settings_path)
+    engine = NeuralEngine(assets, rules, runtime.store, settings_path=runtime.settings_path)
+    engine.clock = runtime.provider.now
+    engine.feature_provider = getattr(runtime, "neural_feature_provider", None)
     if engine.model_error:
         raise DataError(engine.model_error)
     for name, record in proposed["neural"]["assets"].items():
@@ -225,66 +173,21 @@ def _apply_neural(runtime, assets, rules, refresh):
             if name not in assets:
                 raise DataError(f"Keep {name} enabled while its neural paper trade is active")
             asset = assets[name]["symbol"].split("/")[0]
-            if hasattr(engine.model, "trained_through_ms_for"):
-                engine.model.trained_through_ms_for(asset)
-            elif asset not in engine.model.volume_stats:
+            if asset not in engine.model.volume_stats:
                 raise DataError(f"Selected NN model has no trained artifact for {asset}")
     contexts["neural"] = {"assets": assets, "rules": asdict(rules)}
     contexts["positions"] = {"market_mode": rules.market_mode}
     backup = _backup(runtime, "settings", documents, previous_contexts)
     _save(runtime, proposed, contexts, backup)
     runtime.assets, runtime.rules, runtime.refresh = assets, rules, refresh
+    change_source = getattr(runtime.provider, "set_preference", None)
+    if callable(change_source):
+        change_source(rules.market_data_source)
     runtime.low_interval = 300000  # NN stop monitoring uses fixed 5M candles, independently of SMC.
-    runtime.engine, runtime.gex = engine, NaiveGEX(assets, provider=runtime.gex.provider)
+    runtime.position_neural.shared_engine = runtime.paper_neural.shared_engine = engine
+    runtime.engine, runtime.gex = engine, DeribitGEX(assets, provider=runtime.gex.provider)
     runtime.positions.market_mode = rules.market_mode
     runtime.paused = False
-    return _finish(runtime, "Neural settings applied. Existing trades retain their recorded stops and costs.", backup)
+    return _finish(runtime, "Combined SMC and Parente settings applied. Existing trades retain their recorded plans and costs.", backup)
 
 
-def save_model_selection(runtime, selection):
-    """Save the next-start selection, never switch a running ledger underneath workers."""
-    from .ledger import atomic_json
-    if selection != "neural_network":
-        raise DataError("Paper trading uses NN only; SMC is independent market analysis.")
-    if runtime.settings_path is None or not runtime.settings_path.is_file():
-        raise DataError("Model selection needs an existing settings file")
-    with runtime.lock:
-        original = runtime.settings_path.read_bytes()
-        data = json.loads(original.decode("utf-8-sig"))
-        load_settings(runtime.settings_path)
-        data.setdefault("strategy", {})["strategy_model"] = selection
-        Rules(**data["strategy"]).validate()
-        backup = backup_runtime(runtime, action="model-selection")
-        atomic_json(runtime.settings_path, data)
-        return {"message": "Saved NN-only paper trading. Apply saved settings or restart the dashboard.", "backup": str(backup)}
-
-
-def _apply_legacy(runtime, assets, rules, refresh):
-    from .engine import Engine
-    from .ledger import fingerprint
-    if assets != runtime.assets:
-        raise DataError("Legacy pair changes require a separate study; existing paper history is preserved.")
-    documents, contexts = _documents(runtime)
-    proposed = copy.deepcopy(documents)
-    paper = proposed["legacy"]
-    paper["fingerprint"] = fingerprint(assets, rules)
-    for record in paper["assets"].values():
-        record["pending"] = None
-        record["momentum_watch"] = None
-    for document in (paper, proposed["positions"]):
-        for event in document["outbox"]:
-            if event["status"] == "queued":
-                event.update(status="cancelled", error="Settings applied; waiting for fresh evidence.")
-    paper.pop("monitoring_paused", None)
-    if runtime.paused:
-        proposed["legacy"] = new_state(assets, rules)
-    validate_state(proposed["legacy"], assets, rules)
-    previous_contexts = copy.deepcopy(contexts)
-    contexts["legacy"] = {"assets": assets, "rules": asdict(rules)}
-    backup = _backup(runtime, "settings", documents, previous_contexts)
-    _save(runtime, proposed, contexts, backup)
-    runtime.rules, runtime.refresh = rules, refresh
-    runtime.engine = Engine(assets, rules, runtime.store)
-    runtime.positions.market_mode = rules.market_mode
-    runtime.paused = False
-    return _finish(runtime, "Settings applied. Existing paper trades retain their recorded levels and costs.", backup)

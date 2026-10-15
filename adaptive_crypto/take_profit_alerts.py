@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .core import DataError, finite, utc
-from .ledger import queue_event
+from .storage import queue_event
 
 
 def fresh_quote(quote, now):
@@ -11,7 +11,8 @@ def fresh_quote(quote, now):
         stamp = finite(quote["asof_ms"], "quote time", 0)
         if bid > ask or not -2000 <= now-stamp <= 30000:
             return None
-        return {"bid": bid, "ask": ask, "asof_ms": stamp}
+        provenance = {key: quote[key] for key in ("symbol", "source", "quote_kind", "synthetic", "executable", "spread_observed") if key in quote}
+        return {**provenance, "bid": bid, "ask": ask, "asof_ms": stamp}
     except (DataError, KeyError, TypeError):
         return None
 
@@ -38,19 +39,20 @@ def near_take_profit(document, event_id, asset, side, target, quote, now,
         return
     distance_percent = distance/target*100
     quote_side = "bid" if side == "long" else "ask"
-    from .position_alerts import exit_action, identity, price
+    from .position_alerts import exit_action, identity, price, native_quote
     action = exit_action(side)
+    currency = native_quote(position["symbol"] if position else quote.get("symbol"))
     title = f"{asset}{' #' + position['id'][:8] if position else ''} · TAKE-PROFIT APPROACHING · PREPARE TO {action}"
     lines = [title,
-             f"Planned exit action: {action}", f"Target exit price: {price(target)}",
+             f"Planned exit action: {action}", f"Target exit price: {price(target, currency)}",
              "Target not reached yet; this is an advance warning.",
-             f"{'Recorded holding' if scope == 'holding' else 'Paper trade'} · live {quote_side} ${mark:,.8f}",
-             f"Take-profit ${target:,.8f}; ${distance:,.8f} remaining ({distance_percent:.4f}%)",
+             f"{'Recorded holding' if scope == 'holding' else 'Paper trade'} · live {quote_side} {price(mark, currency)}",
+             f"Take-profit {price(target, currency)}; {price(distance, currency)} remaining ({distance_percent:.4f}%)",
              f"Alert range: within {threshold_bps/100:g}% of take-profit"]
     if position:
         lines.insert(1, identity(position))
     if reference is not None:
-        lines.append(f"Key liquidity {'high' if side == 'long' else 'low'} ${reference:,.8f}")
+        lines.append(f"Key liquidity {'high' if side == 'long' else 'low'} {price(reference, currency)}")
     lines.extend([f"Quote observed: {utc(quote['asof_ms'])}",
                   "Holding remains open; record your actual exit in the dashboard." if scope == "holding"
                   else "Paper tracker only; no exchange order."])
@@ -71,7 +73,7 @@ def near_take_profit(document, event_id, asset, side, target, quote, now,
     event.update(text="\n".join(lines), payload=payload, error=None,
                  observed_ms=now,
                  title=title, action_label="PREPARE TO " + action,
-                 summary=f"PREPARE TO {action} · Target exit {price(target)} · Current {quote_side} {price(mark)} · Target not reached",
+                 summary=f"PREPARE TO {action} · Target exit {price(target, currency)} · Current {quote_side} {price(mark, currency)} · Target not reached",
                  expires_ms=int(quote["asof_ms"]+30000), alert_type="near_take_profit",
                  asset=asset, side=side, scope=scope)
     if position_ids is not None:

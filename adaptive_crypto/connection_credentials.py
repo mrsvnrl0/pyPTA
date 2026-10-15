@@ -11,8 +11,10 @@ import threading
 
 from .core import DataError
 from .deribit_settings import protect_credentials
+from .ai_prompts import DEFAULT_MARKET_PROMPT, effective_prompt, validate_prompt
 
-PROVIDERS = {"openai": "OpenAI", "gemini": "Google Gemini"}
+PROVIDERS = {"openai": "OpenAI", "gemini": "Google Gemini", "deepseek": "DeepSeek"}
+DEFAULT_MODELS = {"deepseek": "deepseek-flash"}
 
 
 def secret(value, label, *, required=True):
@@ -46,9 +48,11 @@ def validate_telegram(token, chat):
 
 def environment_ai(environ):
     provider = (environ.get("AI_PROVIDER") or "openai").strip().lower()
-    profiles = {name: {"api_key": (environ.get(prefix+"_API_KEY") or "").strip(),
-                       "model": (environ.get(prefix+"_MODEL") or "").strip()}
-                for name, prefix in (("openai", "OPENAI"), ("gemini", "GEMINI"))}
+    profiles = {}
+    for name, prefix in (("openai", "OPENAI"), ("gemini", "GEMINI"), ("deepseek", "DEEPSEEK")):
+        key = (environ.get(prefix+"_API_KEY") or "").strip()
+        model = (environ.get(prefix+"_MODEL") or "").strip()
+        profiles[name] = {"api_key": key, "model": model or (DEFAULT_MODELS.get(name, "") if key else "")}
     return {"enabled": True, "provider": provider, "profiles": profiles}
 
 
@@ -71,8 +75,15 @@ class ConnectionCredentials:
         except FileNotFoundError:
             if kind == "ai":
                 return environment_ai(self.environment), "environment"
-            return {"enabled": True, "bot_token": (self.environment.get("TELEGRAM_BOT_TOKEN") or "").strip(),
-                    "chat_id": (self.environment.get("TELEGRAM_CHAT_ID") or "").strip()}, "environment"
+            token = (self.environment.get("TELEGRAM_BOT_TOKEN") or "").strip()
+            chat = (self.environment.get("TELEGRAM_CHAT_ID") or "").strip()
+            source = "environment"
+            if not token and not chat:
+                from .project_keys import read_project_key
+                token = read_project_key(self.directory, "TELEGRAM_BOT_TOKEN.md")
+                chat = read_project_key(self.directory, "TELEGRAM_CHAT_ID.md")
+                source = "project keys" if token or chat else "environment"
+            return {"enabled": True, "bot_token": token, "chat_id": chat}, source
         except OSError:
             raise DataError("Saved connection cannot be read. Check access to the settings folder.") from None
         try:
@@ -87,10 +98,12 @@ class ConnectionCredentials:
                 if not isinstance(doc["profiles"], dict) or set(doc["profiles"])-set(PROVIDERS):
                     raise ValueError()
                 for provider, profile in doc["profiles"].items():
-                    if set(profile) != {"api_key", "model"}:
+                    if not isinstance(profile, dict) or not {"api_key", "model"}.issubset(profile) or set(profile)-{"api_key", "model", "prompt"}:
                         raise ValueError()
                     secret(profile["api_key"], "API key")
                     model_id(profile["model"], provider)
+                    if "prompt" in profile:
+                        validate_prompt(profile["prompt"])
             else:
                 if set(doc) != {"version", "enabled", "bot_token", "chat_id"}:
                     raise ValueError()
@@ -109,12 +122,13 @@ class ConnectionCredentials:
             if kind == "ai":
                 provider = doc["provider"]
                 if provider not in PROVIDERS:
-                    raise DataError("Choose OpenAI or Google Gemini as the AI provider.")
+                    raise DataError("Choose OpenAI, Google Gemini or DeepSeek as the AI provider.")
                 profile = doc["profiles"].get(provider, {})
                 key, model = profile.get("api_key", ""), profile.get("model", "")
                 if not key and not model:
                     return None
-                return {"provider": provider, "api_key": secret(key, "AI API key"), "model": model_id(model, provider)}
+                return {"provider": provider, "api_key": secret(key, "AI API key"), "model": model_id(model, provider),
+                        "prompt": effective_prompt(profile.get("prompt"))}
             token, chat = doc["bot_token"], doc["chat_id"]
             if not token and not chat:
                 return None
@@ -133,19 +147,27 @@ class ConnectionCredentials:
                 result = {"configured": configured, "enabled": doc["enabled"], "source": source, "error": error}
                 if kind == "ai":
                     result.update(provider=doc["provider"] if doc["provider"] in PROVIDERS else "openai",
+                                  default_prompt=DEFAULT_MARKET_PROMPT,
                                   profiles={p: {"has_key": bool(doc["profiles"].get(p, {}).get("api_key")),
-                                                "model": doc["profiles"].get(p, {}).get("model", "")}
+                                                "model": doc["profiles"].get(p, {}).get("model", ""),
+                                                "prompt": effective_prompt(doc["profiles"].get(p, {}).get("prompt"))}
                                             for p in PROVIDERS})
                 else:
                     result.update(has_token=bool(doc["bot_token"]), has_chat=bool(doc["chat_id"]))
                 return result
             except DataError as exc:
-                return {"configured": False, "enabled": False, "source": "error", "error": str(exc)}
+                return {"configured": False, "enabled": False, "source": "error", "error": str(exc),
+                        **({"default_prompt": DEFAULT_MARKET_PROMPT} if kind == "ai" else {})}
 
     def _write(self, kind, doc):
         temporary = None
         try:
-            encrypted = self.protector(json.dumps({"version": 1, **doc}, allow_nan=False).encode())
+            plaintext = json.dumps({"version": 1, **doc}, allow_nan=False, ensure_ascii=False).encode("utf-8")
+            if len(plaintext) > 65536:
+                raise ValueError("Connection configuration is too large")
+            encrypted = self.protector(plaintext)
+            if not encrypted or len(encrypted) > 65536:
+                raise ValueError("Encrypted connection configuration is too large")
             self.directory.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=self.directory, prefix=".connection-", suffix=".tmp", delete=False) as stream:
                 temporary = Path(stream.name)
@@ -162,10 +184,12 @@ class ConnectionCredentials:
                 except OSError:
                     pass
 
-    def save_ai(self, provider, model, api_key=""):
+    def save_ai(self, provider, model, api_key="", prompt=None):
         if not isinstance(provider, str) or provider not in PROVIDERS:
-            raise DataError("Choose OpenAI or Google Gemini as the AI provider.")
+            raise DataError("Choose OpenAI, Google Gemini or DeepSeek as the AI provider.")
         model, api_key = model_id(model, provider), secret(api_key, "AI API key", required=False)
+        if prompt is not None:
+            prompt = validate_prompt(prompt)
         with self.lock:
             try:
                 doc, _ = self._load("ai")
@@ -176,12 +200,16 @@ class ConnectionCredentials:
             profiles = copy.deepcopy(doc["profiles"])
             key = api_key or profiles.get(provider, {}).get("api_key", "")
             key = secret(key, "AI API key")
-            # Do not persist incomplete environment profiles for the other provider.
+            # Do not persist incomplete environment profiles for other providers.
             profiles = {p: v for p, v in profiles.items() if p in PROVIDERS and v.get("api_key") and v.get("model")}
             for p, profile in profiles.items():
                 profile["model"] = model_id(profile["model"], p)
                 profile["api_key"] = secret(profile["api_key"], "AI API key")
+            previous_prompt = profiles.get(provider, {}).get("prompt")
             profiles[provider] = {"api_key": key, "model": model}
+            chosen_prompt = previous_prompt if prompt is None else prompt
+            if chosen_prompt:
+                profiles[provider]["prompt"] = validate_prompt(chosen_prompt)
             self._write("ai", {"enabled": True, "provider": provider, "profiles": profiles})
 
     def save_telegram(self, bot_token="", chat_id=""):
@@ -208,6 +236,8 @@ class ConnectionCredentials:
                         if profile.get("api_key") and profile.get("model"):
                             profiles[provider] = {"api_key": secret(profile["api_key"], "API key"),
                                                   "model": model_id(profile["model"], provider)}
+                            if profile.get("prompt"):
+                                profiles[provider]["prompt"] = validate_prompt(profile["prompt"])
                     doc["profiles"] = profiles
                 elif doc["bot_token"] or doc["chat_id"]:
                     validate_telegram(doc["bot_token"], doc["chat_id"])

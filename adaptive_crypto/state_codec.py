@@ -42,7 +42,7 @@ def encode(document, *, previous=None, previous_rows=None):
 
     for field, collection in LISTS.items():
         split_list(root, field, collection, old_container=previous)
-    for field, collection in (("assets", "asset"), ("watches", "watch")):
+    for field, collection in (("assets", "asset"), ("market_structure", "market_structure")):
         if field not in root:
             continue
         if not isinstance(root[field], dict):
@@ -93,7 +93,7 @@ def decode(root_json, rows):
     for field, collection in LISTS.items():
         restore(root, field, collection)
     restore(root, "assets", "asset", mapping=True)
-    restore(root, "watches", "watch", mapping=True)
+    restore(root, "market_structure", "market_structure", mapping=True)
     for name, asset in root.get("assets", {}).items():
         for field, collection in ASSET_LISTS.items():
             restore(asset, field, collection, name)

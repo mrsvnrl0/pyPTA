@@ -1,7 +1,7 @@
 {% if s.administration.settings_file %}
 <section class="strategy-controls settings-card" id="settings-database" aria-label="Strategy settings and database">
 <h3>Settings and database</h3>
-<p>Save edits in the form above, then apply them here. Existing paper trades and actual positions retain their recorded levels and costs. SMC criteria change the displayed market analysis. NN settings apply to the paper simulation.</p>
+<p>Save edits in the form above, then apply them here. Existing paper trades and actual positions retain their recorded levels and costs. SMC criteria change the displayed market analysis. Paper settings apply to the simulation. Currency-pair changes require a cleared paper account and no open holding/watch in the previous pair. Parente keeps its fixed Binance/USDT input contract.</p>
 <p class="muted">Settings file: <code>{{ s.administration.settings_file }}</code></p>
 <p class="muted">Backups keep one complete copy of settings and trading data in <code>backup/latest.zip</code>. Each new backup replaces the previous copy.</p>
 <p>For a fresh start, purge first, then apply settings. Purge backs up and clears all paper trades, pending orders, recorded holdings, buy watches and their history. Paper trading stays paused until you apply settings; market analysis continues. Paper cash then starts at the equity in your saved JSON.</p>

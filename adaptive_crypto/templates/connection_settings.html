@@ -1,15 +1,19 @@
 <section class="settings-card" id="ai-connection" aria-labelledby="ai-connection-title">
 <h2 id="ai-connection-title">AI commentary</h2>
-<p class="muted">Choose the provider for the Home market summary and optional signal commentary. The market summary researches news and public posts every 15 minutes and uses your provider's paid generation and search quota. Select a text model supporting web search. Each provider keeps its own key and model.</p>
+<p class="muted">Choose the provider for Home market commentary and optional signal commentary. Home researches news and public posts every 15 minutes with your provider's native web search and uses your provider's paid generation and search quota. Each provider keeps its own key, model and prompt.</p>
 <p data-connection-status="ai" role="status" aria-live="polite">Loading AI connection…</p>
 <p data-connection-local class="muted" hidden>Open Settings at this computer's http://127.0.0.1 dashboard address to manage connections.</p>
 <form data-connection="ai" action="/api/settings/connections/ai" autocomplete="off">
 <div class="settings-grid">
-<label>AI provider<select name="provider" disabled><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option></select></label>
+<label>AI provider<select name="provider" disabled><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option><option value="deepseek">DeepSeek</option></select></label>
 <label>Model ID<input name="model" type="text" autocomplete="off" spellcheck="false" maxlength="200" required aria-describedby="ai-model-help" disabled></label>
 <label>API key<input name="api_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" aria-describedby="ai-key-help" disabled></label>
 </div>
-<p id="ai-model-help" class="muted">Enter a text model ID available in your provider account. <a href="https://developers.openai.com/api/docs/models" target="_blank" rel="noopener noreferrer">OpenAI models</a> · <a href="https://ai.google.dev/gemini-api/docs/models" target="_blank" rel="noopener noreferrer">Gemini models</a></p>
+<label for="ai-prompt">AI prompt</label>
+<textarea id="ai-prompt" name="prompt" rows="8" maxlength="6000" aria-describedby="ai-prompt-help" disabled></textarea>
+<p id="ai-prompt-help" class="muted">Used for Home market commentary. Save AI connection to apply. Leave blank to use the default.</p>
+<button type="button" class="secondary" data-connection-action="default-prompt" disabled>Use default prompt</button>
+<p id="ai-model-help" class="muted">Enter a text model ID available in your provider account. <a href="https://developers.openai.com/api/docs/models" target="_blank" rel="noopener noreferrer">OpenAI models</a> · <a href="https://ai.google.dev/gemini-api/docs/models" target="_blank" rel="noopener noreferrer">Gemini models</a> · <a href="https://api-docs.deepseek.com/quick_start/pricing" target="_blank" rel="noopener noreferrer">DeepSeek models</a>. New DeepSeek connections default to deepseek-flash; you can enter another available model ID, such as deepseek-v4-pro.</p>
 <p id="ai-key-help" class="muted">Keys are encrypted for your Windows user and excluded from backups. Saved keys are never shown here.</p>
 <div class="form-actions"><button type="submit" disabled>Save AI connection</button><button type="button" class="secondary" data-connection-action="check" disabled>Check credentials</button><button type="button" class="secondary" data-connection-action="disable" disabled>Disable AI</button><button type="button" class="secondary" data-connection-action="discard" disabled>Discard AI edits</button></div>
 <p class="muted">Checking credentials retrieves model information. It does not generate commentary or verify generation quota.</p>

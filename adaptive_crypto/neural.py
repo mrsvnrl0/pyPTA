@@ -1,7 +1,7 @@
 """Parente et al. (2024) classifier: fixed historical scaling, causal inference.
 
 See docs/NEURAL_STRATEGY.md for the paper/source differences and model provenance.
-Numerical dependencies are optional until this strategy is selected.
+Numerical dependencies load when the fixed Parente model is constructed.
 """
 from __future__ import annotations
 
@@ -69,28 +69,6 @@ def feature_frame(candles, volume_stats):
     return result.loc[:, FEATURES].replace([np.inf, -np.inf], np.nan)
 
 
-def labels(closes, backward=5, forward=2, alpha=.038, beta=.24, convention="source"):
-    """Training labels only. Unknown future tails stay NaN, never fabricated HOLDs.
-
-    Source code: adjusted EMA, no fee in labels, beta*(1+forward*.1).
-    Paper prose: beta*(1+(forward-1)*.1). This option exposes the discrepancy.
-    """
-    np, pd, _ = dependencies()
-    if any(type(n) is not int or not 1 <= n <= 5 for n in (backward, forward)):
-        raise DataError("Label windows must be integers from 1 to 5")
-    if convention not in {"source", "paper"} or not 0 < alpha < beta < 1:
-        raise DataError("Invalid label thresholds or convention")
-    values = pd.Series(closes, dtype=float)
-    if not np.isfinite(values).all() or (values <= 0).any():
-        raise DataError("Labels require finite positive prices")
-    baseline = values.ewm(span=backward, adjust=True).mean()
-    change = values.shift(-forward)/baseline-1
-    upper = beta*(1+.1*(forward if convention == "source" else forward-1))
-    selected = (change.abs() > alpha) & (change.abs() < upper)
-    result = pd.Series(np.where(selected, np.where(change > 0, -1., 1.), 0.))
-    result[change.isna()] = np.nan
-    return result
-
 
 class NeuralModel:
     """Data-only NPZ loading; neither pickle nor Keras object deserialization."""
@@ -125,6 +103,7 @@ class NeuralModel:
                         or not all(type(v) in {int, float} for v in stats)
                         or not np.isfinite(stats).all() or stats[0] < 0 or stats[1] <= 0):
                     raise DataError("Invalid frozen volume calibration")
+            self.metadata["description"] = "Authors' published Parente 5/2 weights, reconstructed final-training scaler and frozen Binance base-volume calibration. Live input uses Binance spot/USDT completed 4H candles."
         except (OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
             raise DataError(f"Cannot load neural model: {exc}") from exc
 

@@ -5,27 +5,35 @@ import copy
 import math
 import threading
 import time
-import requests
+from .gex_currency import profile_for_market, require_market_currency
 from .core import DataError, finite, normalise_pair, safe_error
 
-YEAR_MS = 365.25 * 86400000
+YEAR_MS = 365 * 86400000
+PRICING_MODEL = "forward-basis-spot-delta-v2"
 MAX_AGE_MS = 300000
 SMC_MAX_AGE_MS = 45000
 
 
 def exposure(option, spot):
-    """Zero-rate Black-Scholes gamma, USD delta change per 1% spot move.
+    """Conventional delta change per 1% index move, in quote currency.
 
+    Reprice each expiry at its observed forward/index ratio (fixed carry).
+    d N(d1)/d spot = phi(d1)/(spot * IV * sqrt(T)); using a forward gamma
+    without the forward/spot sensitivity would mix the two price coordinates.
+    This is not the gamma of the coin-denominated option premium.
     Deribit option OI is already in base coins: do NOT multiply contract_size.
     Calls positive / puts negative is an assumption, not dealer inventory.
     """
     width = option["iv"] * math.sqrt(option["years"])
-    d1 = (math.log(spot / option["strike"]) + width * width / 2) / width
+    forward = spot * option.get("forward_ratio", 1.)
+    d1 = (math.log(forward / option["strike"]) + width * width / 2) / width
     gamma = math.exp(-d1 * d1 / 2) / (math.sqrt(2 * math.pi) * spot * width)
     return gamma * option["oi"] * spot * spot * .01 * option["sign"]
 
 
-def build_profile(instruments, summaries, base, spot, now):
+def build_profile(instruments, summaries, base, spot, now, *, quote_currency="USD"):
+    if quote_currency not in {"USD", "USDC"}:
+        raise DataError("Unsupported options quote currency")
     spot = finite(spot, "options index", 1e-15)
     books = {}
     for book in summaries:
@@ -36,6 +44,7 @@ def build_profile(instruments, summaries, base, spot, now):
     options, stamps, expiries = [], [], []
     seen = set()
     eligible = 0
+    forward_priced = 0
     for inst in instruments:
         if inst.get("base_currency") != base or inst.get("kind") != "option" or not inst.get("is_active"):
             continue
@@ -60,7 +69,11 @@ def build_profile(instruments, summaries, base, spot, now):
         kind = inst.get("option_type")
         if kind not in {"call", "put"}:
             raise DataError("Unknown option type")
+        # Deribit mark IV uses the expiry forward, not the current index.
+        forward = finite(book.get("underlying_price"), "option forward", 1e-15)
+        forward_priced += 1
         options.append({"strike": finite(inst["strike"], "strike", 1e-15),
+                        "forward_ratio": forward / spot,
                         "iv": finite(book["mark_iv"], "mark IV", 1e-15) / 100,
                         "oi": oi, "years": (expiry - now) / YEAR_MS,
                         "sign": 1 if kind == "call" else -1})
@@ -75,10 +88,10 @@ def build_profile(instruments, summaries, base, spot, now):
         row["call_gex" if option["sign"] > 0 else "put_gex"] += value
         row["net_gex"] += value
     rows = sorted(strikes.values(), key=lambda r: r["strike"])
-    calls = [r for r in rows if r["net_gex"] > 0]
-    puts = [r for r in rows if r["net_gex"] < 0]
-    call = max(calls, key=lambda r: r["net_gex"], default=None)
-    put = min(puts, key=lambda r: r["net_gex"], default=None)
+    calls = [r for r in rows if r["call_gex"] > 0]
+    puts = [r for r in rows if r["put_gex"] < 0]
+    call = max(calls, key=lambda r: r["call_gex"], default=None)
+    put = min(puts, key=lambda r: r["put_gex"], default=None)
     def total(price):
         return finite(math.fsum(exposure(o, price) for o in options), "net gamma")
     # Reprice the entire chain with fixed IV/OI. A strike cumulative sum is NOT a flip.
@@ -99,79 +112,76 @@ def build_profile(instruments, summaries, base, spot, now):
                 high = mid
         roots.append((low + high) / 2)
     net = total(spot)
+    gross = math.fsum(abs(exposure(o, spot)) for o in options)
     return {"status": "ready", "stale": False, "error": None, "source": "Deribit",
             "base": base, "spot": spot, "asof_ms": int(min(stamps)), "calculated_ms": now,
             "expires_ms": int(min(expiries)), "option_count": len(options), "eligible_count": eligible,
-            "strikes": rows, "net_gex": net,
+            "strikes": rows, "net_gex": net, "gross_gex": gross,
+            "net_to_gross": abs(net)/gross if gross else None,
+            "pricing_model": PRICING_MODEL, "day_count": "ACT/365",
+            "forward_priced_count": forward_priced,
             "regime": "positive" if net > 0 else "negative" if net < 0 else "neutral",
             "call_wall": copy.deepcopy(call), "put_wall": copy.deepcopy(put),
             "gamma_flip": min(roots, key=lambda p: abs(p-spot)) if roots else None,
             "flip_candidates": roots, "flip_range": [curve[0]["price"], curve[-1]["price"]],
-            "curve": curve, "units": "USD delta per 1% index move"}
+            "curve": curve, "price_currency":quote_currency, "quote_currency":quote_currency, "exposure_currency":quote_currency,
+            "units": quote_currency+" delta per 1% index move",
+            "sign_assumption": "Calls positive, puts negative; dealer inventory is not observed",
+            "wall_method": "Largest call gamma and largest absolute put gamma separately"}
 
 
-class NaiveGEX:
-    """Independent cache: options outages cannot block candle scans or trades."""
+class DeribitGEX:
+    """Cache Deribit chains independently of NN inference and stop monitoring."""
     def __init__(self, assets, provider=None, ttl=120):
         self.assets = {name: normalise_pair(cfg["symbol"]) for name, cfg in assets.items()}
-        self.provider = provider
-        self.ttl = ttl
-        self.cache = {}
+        self.provider, self.ttl = provider, ttl
+        self.cache, self.published, self.feed_history = {}, {}, {}
         self.locks = {name: threading.Lock() for name in assets}
         self.snapshot_lock = threading.Lock()
-        self.published = {}
-        self.refreshing = set()
-        self.next_refresh = {}
-        self.feed_history = {}
+        self.refreshing, self.next_refresh = set(), {}
+
+    @staticmethod
+    def _current_copy(profile, now):
+        result = copy.deepcopy(profile)
+        if result and result.get("status") in {"ready", "partial"}:
+            stamp, expiry = result.get("asof_ms"), result.get("expires_ms")
+            deadline = result.get("fx_valid_until_ms", expiry)
+            if (type(stamp) is not int or type(expiry) is not int or type(deadline) is not int
+                    or not 0 <= now-stamp < MAX_AGE_MS or now >= min(expiry, deadline)):
+                result.update(status="stale", stale=True, error="Deribit options snapshot or quote conversion expired")
+        return result
 
     def diagnostics(self, now_ms=None):
-        """Read published metadata without fetching or taking a provider lock."""
         now = int(time.time()*1000) if now_ms is None else now_ms
-        monotonic_now = time.monotonic()
+        mono = time.monotonic()
         with self.snapshot_lock:
-            published = copy.deepcopy(self.published)
-            history = copy.deepcopy(self.feed_history)
-            refreshing = set(self.refreshing)
-            next_refresh = dict(self.next_refresh)
+            published, history = copy.deepcopy(self.published), copy.deepcopy(self.feed_history)
+            refreshing, scheduled = set(self.refreshing), dict(self.next_refresh)
         rows = {}
         for name, symbol in self.assets.items():
-            base, _, quote = symbol.partition("/")
-            profile = published.get(name, {})
-            details = history.get(name, {})
-            supported = base in {"BTC", "ETH", "SOL"} and quote == "USD"
+            profile = self._current_copy(published.get(name), now) or {}
+            detail = history.get(name, {})
             stamp, expiry = profile.get("asof_ms"), profile.get("expires_ms")
-            valid_until = min(stamp+MAX_AGE_MS, expiry) if stamp is not None and expiry else None
-            status, error = profile.get("status", "unknown"), profile.get("error")
-            if not supported:
-                status, error = "unsupported", "Naive GEX supports BTC/USD, ETH/USD and SOL/USD only"
-            elif status == "ready" and (valid_until is None or now >= valid_until or now < stamp-2000):
-                status, error = "stale", "Options snapshot aged or an included expiry settled"
-            busy = name in refreshing or details.get("in_progress", False)
-            # HTTP requests honor the provider cache deadline; background scans
-            # can have a later throttle after reading that cache. Do not promise
-            # that a scan starts a fetch as soon as the HTTP cache is eligible.
-            retry_at = details.get("retry_at", 0)
-            eligible_ms = now+max(0, int((retry_at-monotonic_now)*1000)) if supported and not busy else None
-            scan_at = max(retry_at, next_refresh.get(name, 0))
-            rows[name] = {"status": status, "error": error, "asof_ms": stamp,
-                          "valid_until_ms": valid_until, "refreshing": bool(busy),
-                          "last_attempt_ms": details.get("last_attempt_ms"),
-                          "last_success_ms": details.get("last_success_ms"),
-                          "last_failure_ms": details.get("last_failure_ms"),
-                          "last_failure": details.get("last_failure"),
-                          "next_eligible_ms": eligible_ms,
-                          "next_scan_eligible_ms": now+max(0, int((scan_at-monotonic_now)*1000)) if supported and not busy else None,
-                          "next_check": "Unsupported pair" if not supported else
-                          "Refresh in progress" if busy else
-                          "Eligible for a GEX request; scans use their separate refresh schedule" if retry_at <= monotonic_now else
-                          "Cache retry eligibility; a later GEX request or eligible scan starts the refresh"}
+            valid = min(stamp+MAX_AGE_MS, expiry, profile.get("fx_valid_until_ms",expiry)) if stamp and expiry else None
+            busy = name in refreshing or detail.get("in_progress",False)
+            retry = detail.get("retry_at",0)
+            rows[name] = {"status":profile.get("status","unknown"),"error":profile.get("error"),
+                "asof_ms":stamp,"valid_until_ms":valid,"refreshing":busy,
+                "last_attempt_ms":detail.get("last_attempt_ms"),"last_success_ms":detail.get("last_success_ms"),
+                "last_failure_ms":detail.get("last_failure_ms"),"last_failure":detail.get("last_failure"),
+                "sources":profile.get("sources",[]),"coverage_complete":profile.get("coverage_complete"),
+                "price_currency":symbol.split("/")[1],"exposure_currency":symbol.split("/")[1],
+                "next_eligible_ms":None if busy else now+max(0,int((retry-mono)*1000)),
+                "next_scan_eligible_ms":None if busy else now+max(0,int((max(retry,scheduled.get(name,0))-mono)*1000)),
+                "next_check":"Refresh in progress" if busy else "Next scheduled Deribit options snapshot"}
         return rows
 
     def snapshot(self, name):
-        """Return immediately; options network work never holds up exits or scans."""
+        if name not in self.assets:
+            raise KeyError(name)
         with self.snapshot_lock:
             result = copy.deepcopy(self.published.get(name))
-            if name not in self.refreshing and time.monotonic() >= self.next_refresh.get(name, 0):
+            if name not in self.refreshing and time.monotonic() >= self.next_refresh.get(name,0):
                 self.refreshing.add(name)
                 def refresh():
                     try:
@@ -179,80 +189,77 @@ class NaiveGEX:
                     finally:
                         with self.snapshot_lock:
                             self.refreshing.discard(name)
-                            self.next_refresh[name] = time.monotonic()+self.ttl
-                threading.Thread(target=refresh, daemon=True, name="gex-"+name).start()
-        return result
+                            self.next_refresh[name] = self.cache.get(name, {}).get("retry_at", time.monotonic()+self.ttl)
+                threading.Thread(target=refresh,daemon=True,name="gex-"+name).start()
+        return self._current_copy(result,int(time.time()*1000))
 
-    @staticmethod
-    def fetch(base, currency):
-        with requests.Session() as session:
-            def get(method, **params):
-                response = session.get("https://www.deribit.com/api/v2/public/" + method,
-                                       params=params, timeout=(4, 8))
-                response.raise_for_status()
-                body = response.json()
-                if not isinstance(body, dict) or body.get("error") or "result" not in body:
-                    raise DataError("Deribit returned an invalid options response")
-                return body["result"]
-            instruments = get("get_instruments", currency=currency, kind="option", expired="false")
-            summaries = get("get_book_summary_by_currency", currency=currency, kind="option")
-            index = get("get_index_price", index_name=base.lower() + ("_usdc" if currency == "USDC" else "_usd"))
-            return instruments, summaries, index["index_price"]
-
-    def get(self, name):
+    def get(self,name):
         if name not in self.assets:
             raise KeyError(name)
-        base, _, quote = self.assets[name].partition("/")
-        if base not in {"BTC", "ETH", "SOL"} or quote != "USD":
-            return {"status": "unsupported", "stale": False, "asof_ms": None,
-                    "error": "Naive GEX supports BTC/USD, ETH/USD and SOL/USD only"}
+        base,quote = self.assets[name].split("/")
         with self.locks[name]:
-            now = int(time.time() * 1000)
-            cached = self.cache.get(name)
-            if cached and time.monotonic() < cached["retry_at"]:
-                result = copy.deepcopy(cached["result"])
+            now=int(time.time()*1000)
+            cached=self.cache.get(name)
+            if cached and time.monotonic()<cached["retry_at"]:
+                result=self._current_copy(cached["result"],now)
             else:
                 with self.snapshot_lock:
-                    history = self.feed_history.setdefault(name, {})
-                    history.update(last_attempt_ms=now, in_progress=True)
+                    detail=self.feed_history.setdefault(name,{})
+                    detail.update(last_attempt_ms=now,in_progress=True)
                 try:
-                    currency = "USDC" if base == "SOL" else base
-                    instruments, summaries, spot = (self.provider or self.fetch)(base, currency)
-                    now = int(time.time() * 1000)
-                    result = build_profile(instruments, summaries, base, spot, now)
-                    result["market"] = f"{base} options · {currency} settlement · all active expiries"
-                    result["quote_currency"] = "USDC" if currency == "USDC" else "USD"
-                    result["units"] = result["quote_currency"] + " delta per 1% index move"
+                    if self.provider is None:
+                        raise DataError("Deribit options provider is required")
+                    result=self.provider(base,quote)
+                    if not isinstance(result,dict):
+                        raise DataError("Invalid Deribit GEX response")
+                    require_market_currency(result,self.assets[name],int(time.time()*1000))
+                    if result.get("status")=="ready" and result.get("coverage_complete") is not True:
+                        raise DataError("Incomplete Deribit options coverage")
+                    if result.get("status")=="unavailable" and cached and cached["result"].get("strikes"):
+                        failure=result
+                        result=copy.deepcopy(cached["result"])
+                        result.update(status="stale",stale=True,coverage_complete=False,
+                                      sources=failure.get("sources",[]),error=failure.get("error"))
                     with self.snapshot_lock:
-                        self.feed_history[name]["last_success_ms"] = now
+                        if result.get("status")=="ready":
+                            self.feed_history[name]["last_success_ms"]=int(time.time()*1000)
+                        else:
+                            self.feed_history[name].update(last_failure_ms=int(time.time()*1000),last_failure=result.get("error"))
                 except Exception as exc:
-                    result = copy.deepcopy(cached["result"]) if cached else {"asof_ms": None}
-                    result.update(status="stale" if result.get("asof_ms") else "unavailable",
-                                  stale=True, error=safe_error(exc))
+                    result=copy.deepcopy(cached["result"]) if cached else {"asof_ms":None,"base":base,"symbol":self.assets[name],"price_currency":quote,"exposure_currency":quote}
+                    result.update(status="stale" if result.get("asof_ms") else "unavailable",stale=True,error=safe_error(exc))
                     with self.snapshot_lock:
-                        self.feed_history[name].update(last_failure_ms=int(time.time()*1000),
-                                                       last_failure=result["error"])
-                self.cache[name] = {"result": copy.deepcopy(result), "retry_at": time.monotonic() + self.ttl}
+                        self.feed_history[name].update(last_failure_ms=int(time.time()*1000),last_failure=result["error"])
+                delay = self.ttl
+                deadline = result.get("fx_valid_until_ms")
+                if result.get("status") in {"ready", "partial"} and type(deadline) is int:
+                    delay = min(delay, max(1., (deadline-int(time.time()*1000))/1000-5.))
+                self.cache[name]={"result":copy.deepcopy(result),"retry_at":time.monotonic()+delay}
                 with self.snapshot_lock:
-                    self.feed_history[name].update(in_progress=False, retry_at=self.cache[name]["retry_at"])
-            if result.get("status") == "ready" and (
-                    not -2000 <= now - result["asof_ms"] <= MAX_AGE_MS or now >= result["expires_ms"]):
-                result.update(status="stale", stale=True, error="Options snapshot aged or an included expiry settled")
+                    self.feed_history[name].update(in_progress=False,retry_at=self.cache[name]["retry_at"])
+                result=self._current_copy(result,int(time.time()*1000))
             with self.snapshot_lock:
-                self.published[name] = copy.deepcopy(result)
+                self.published[name]=copy.deepcopy(result)
             return result
 
 
 def map_smc(profile, row, now):
     """Exact wall/block overlap with current, healthy SMC evidence only."""
-    result = copy.deepcopy(profile)
+    try:
+        symbol = row.get("symbol") or profile.get("symbol")
+        result = profile_for_market(profile, symbol, now)
+        currency_deadline = require_market_currency(result, symbol, now)
+    except (DataError, TypeError, ValueError, KeyError) as exc:
+        result = copy.deepcopy(profile)
+        result.update(status="unavailable", stale=True, error="GEX/SMC price coordinate unavailable: " + safe_error(exc))
+        currency_deadline = None
     quote = row.get("quote") or {}
     price, quote_until, scan_until = None, None, None
     try:
-        bid = finite(quote.get("bid"), "Kraken bid", 1e-15)
-        ask = finite(quote.get("ask"), "Kraken ask", 1e-15)
-        last = finite(quote.get("last"), "Kraken last", 1e-15)
-        stamp = finite(quote.get("asof_ms"), "Kraken quote time", 0)
+        bid = finite(quote.get("bid"), "Spot bid", 1e-15)
+        ask = finite(quote.get("ask"), "Spot ask", 1e-15)
+        last = finite(quote.get("last"), "Spot last", 1e-15)
+        stamp = finite(quote.get("asof_ms"), "Spot quote time", 0)
         if bid <= ask and -2000 <= now-stamp <= SMC_MAX_AGE_MS and not row.get("errors", {}).get("clock"):
             price, quote_until = last, int(stamp+SMC_MAX_AGE_MS)
         scan_stamp = finite(row.get("asof_ms"), "SMC scan time", 0)
@@ -262,16 +269,19 @@ def map_smc(profile, row, now):
         pass
     fresh = (price is not None and scan_until is not None and
              not row.get("errors") and not row.get("scan_error"))
+    result["market_source_label"] = row.get("market_source_label", "Deribit composite index")
     result["price"] = price
     result["price_valid_until_ms"] = quote_until
     result["smc_valid_until_ms"] = min(quote_until, scan_until) if fresh else None
     result["options_valid_until_ms"] = (min(result["asof_ms"]+MAX_AGE_MS, result["expires_ms"])
                                          if result.get("asof_ms") is not None and result.get("expires_ms") else None)
-    if result.get("status") == "ready" and (result.get("stale") or
+    if currency_deadline is not None and result["options_valid_until_ms"] is not None:
+        result["options_valid_until_ms"] = min(result["options_valid_until_ms"], currency_deadline)
+    if result.get("status") in {"ready", "partial"} and (result.get("stale") or
             result["options_valid_until_ms"] is None or now >= result["options_valid_until_ms"]
             or now < result["asof_ms"]-2000):
         result.update(status="stale", stale=True, error="Options snapshot aged or an included expiry settled")
-    ready = result.get("status") == "ready"
+    ready = result.get("status") == "ready" and result.get("coverage_complete") is True
     result["smc_fresh"] = bool(fresh)
     result["basis_percent"] = (100*(result["spot"]/price-1)
                                if ready and price is not None and result.get("spot") else None)
@@ -285,42 +295,41 @@ def map_smc(profile, row, now):
                                  "above" if distance > 0 else "below" if distance < 0 else "at"})
     zones = []
     result["zone_errors"] = []
-    if fresh:
-        for key, wall_key, label in (("smc_short", "call_wall", "Bearish HTF order block"),
-                                     ("smc_long", "put_wall", "Bullish HTF order block")):
-            strategy = row.get(key) or {}
-            setup = strategy.get("setup")
-            if not setup:
-                continue
-            try:
-                if setup.get("kind") == "breakout":
-                    continue  # A lower-timeframe breakout range is not an HTF order block.
-                low = finite(setup["zone_low"], "order block low", 1e-15)
-                high = finite(setup["zone_high"], "order block high", low)
-                confirmed = finite(setup["bos_end"], "structure confirmation time", 0)
-                if confirmed > now:
-                    raise DataError("Order block confirmation is in the future")
-            except (DataError, KeyError, TypeError) as exc:
-                result["zone_errors"].append(f"{label} unavailable: {safe_error(exc)}")
-                continue
-            wall = result.get(wall_key)
-            reference_only = any(word in str(strategy.get("status", "")).upper() for word in
-                                 ("MISSED", "EXPIRED", "RETIRED", "HISTORY"))
-            overlap = (low <= wall["strike"] <= high) if wall else False
-            nearest = low if price < low else high if price > high else price
-            zones.append({"label": label, "low": low, "high": high,
-                          "side": "short" if key == "smc_short" else "long",
-                          "confirmed_ms": int(confirmed), "wall_price": wall["strike"] if wall else None,
-                          "distance_percent": 100*(nearest/price-1),
-                          "relation": "above" if price < low else "below" if price > high else "inside",
-                          "reference_only": reference_only,
-                          "confluence": bool(overlap and not reference_only and ready)})
+    pine = row.get("pine_structure") or (row.get("gex_context") or {}).get("pine_structure")
+    if isinstance(pine, dict) and pine.get("source") == "pine_smc":
+        # Pine volume-pivot blocks are authoritative for the dashboard; never
+        # reconstruct a different SMC block in the options view.
+        zones = []
+        if fresh and pine.get("status") == "ready":
+            for zone in pine.get("zones", []):
+                if zone.get("status") not in {"active", "tested", "mitigated"}:
+                    continue
+                try:
+                    low = finite(zone["low"], "Pine block low", 1e-15)
+                    high = finite(zone["high"], "Pine block high", low)
+                    known = int(finite(zone["known_ms"], "Pine block confirmation", 0))
+                    if known > now or zone.get("side") not in {"long", "short"}:
+                        continue
+                    wall = result.get("put_wall" if zone["side"] == "long" else "call_wall")
+                    reference = zone["status"] == "mitigated"
+                    nearest = low if price < low else high if price > high else price
+                    zones.append({"label": "Perky SMC " + zone["side"] + " order block",
+                        "low": low, "high": high, "side": zone["side"], "confirmed_ms": known,
+                        "wall_price": wall["strike"] if wall else None,
+                        "distance_percent": 100*(nearest/price-1),
+                        "relation": "above" if price < low else "below" if price > high else "inside",
+                        "reference_only": reference,
+                        "confluence": bool(ready and wall and low <= wall["strike"] <= high and not reference)})
+                except (DataError, KeyError, TypeError):
+                    result["zone_errors"].append("Invalid Perky SMC order block")
     result["zones"] = zones
     confluence = copy.deepcopy(row.get("gex_context") or {})
     selection_fresh = (fresh and ready and confluence.get("ready") and
+                       confluence.get("price_currency", "USD") == result.get("price_currency", "USD") and
                        confluence.get("gex_asof_ms") == result.get("asof_ms") and
                        now < confluence.get("valid_until_ms", 0))
-    result["pois"] = confluence.get("pois", []) if fresh else []
+    result["pois"] = (confluence.get("pois", []) if fresh and
+                      confluence.get("price_currency", "USD") == result.get("price_currency", "USD") else [])
     result["target_confluence"] = {**confluence, "ready": bool(selection_fresh),
         "matches": confluence.get("matches", []) if selection_fresh else [],
         "reason": confluence.get("reason", "Waiting for SMC target analysis") if selection_fresh or not confluence.get("ready")

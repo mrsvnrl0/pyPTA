@@ -13,8 +13,8 @@ def _measurements(market, paper, errors, now, refresh):
     observed = market.get("asof_ms") or paper.get("asof_ms")
     quote = market.get("quote") if market else paper.get("quote")
     quote = fresh_quote(quote, now)
-    error_text = "; ".join(f"{key}: {value}" for key, value in sorted(errors.items()) if value)
-    quote_error = error_text or (None if quote else "Waiting for a fresh Kraken bid/ask quote")
+    error_text = "; ".join(f"{key}: {value}" for key, value in sorted(errors.items()) if key in {"quote", "clock"} and value)
+    quote_error = error_text or (None if quote else "Waiting for a fresh selected-pair price")
     nn = market.get("nn") if market else paper.get("neural")
     nn = nn or {}
     signal = nn.get("signal") or {}
@@ -26,15 +26,17 @@ def _measurements(market, paper, errors, now, refresh):
     if not smc_error and not (market.get("smc_long") and market.get("smc_short")):
         smc_error = "Waiting for completed SMC analysis"
     if not smc_error and not quote:
-        smc_error = "Waiting for a fresh Kraken bid/ask quote"
+        smc_error = "Waiting for a fresh selected-pair price"
     quote_until = int(quote["asof_ms"]+30000) if quote else None
     smc_until = min(observed+SMC_MAX_AGE_MS, quote_until) if observed and quote_until else None
     return {
-        "kraken": {"label": "Kraken", "error": quote_error,
+        "market": {"label": (quote or {}).get("source", "Selected-pair market"), "error": quote_error,
                    "asof_ms": int(quote["asof_ms"]) if quote else None,
-                   "valid_until_ms": quote_until},
-        "nn": {"label": "NN", "error": nn_error, "asof_ms": signal.get("signal_end"),
-               "valid_until_ms": nn_until},
+                   "valid_until_ms": quote_until,
+                   "sources": [{"venue": venue, "status": "ready", "asof_ms": values.get("asof_ms")}
+                               for venue, values in (quote.get("source_quotes", {}) if quote else {}).items()]},
+        "nn": {"label": "Parente - Binance spot/USDT", "error": nn_error, "asof_ms": signal.get("signal_end"),
+               "valid_until_ms": nn_until, "input_source": copy.deepcopy(nn.get("input_source"))},
         "smc": {"label": "SMC", "error": smc_error, "asof_ms": observed,
                 "valid_until_ms": smc_until},
     }
@@ -54,7 +56,7 @@ def record_feed_observation(runtime, name, market, errors, observed_ms):
             if row["error"]:
                 result.update(last_failure_ms=observed_ms, last_failure=row["error"])
             else:
-                result["last_success_ms"] = row["asof_ms"] if key == "kraken" else observed_ms
+                result["last_success_ms"] = row["asof_ms"] if key == "market" else observed_ms
             asset[key] = result
 
 
@@ -79,9 +81,9 @@ def build_feed_status(runtime, now_ms=None):
                                     data.get(name, {}).get("errors", {}), now, refresh)
             for key, row in current.items():
                 row["last_attempt_ms"] = observed
-                row["last_success_ms"] = (row["asof_ms"] if key == "kraken" else observed) if not row["error"] else None
+                row["last_success_ms"] = (row["asof_ms"] if key == "market" else observed) if not row["error"] else None
         feeds = []
-        for key in ("kraken", "nn", "smc"):
+        for key in ("market", "nn", "smc"):
             row = copy.deepcopy(current[key])
             until = row.get("valid_until_ms")
             status = "unknown" if row.get("last_attempt_ms") is None else "unavailable" if row.get("error") else "ready"
@@ -90,7 +92,7 @@ def build_feed_status(runtime, now_ms=None):
             row.update(key=key, status=status, next_eligible_ms=None,
                        next_check=f"Next scanner cycle ({refresh:g}s configured); no fixed retry time recorded")
             feeds.append(row)
-        feeds.append({"key": "gex", "label": "Deribit GEX", **gex_rows[name]})
+        feeds.append({"key": "gex", "label": "Deribit options GEX", **gex_rows[name]})
         rows.append({"name": name, "symbol": cfg["symbol"], "feeds": feeds})
     return {"generated_ms": now, "last_scan_ms": updated, "scan_error": error,
             "paper_paused": paused, "assets": rows}

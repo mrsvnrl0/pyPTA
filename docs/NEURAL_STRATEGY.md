@@ -1,111 +1,67 @@
-# Neural-network model and paper simulation
+# Parente 5/2 and combined paper execution
 
-pyPTA uses the published Parente 5/2 model on completed 4H candles. Paper Trading always runs the neural strategy. With the default **NN limitations** checkbox on, BUY opens one paper spot position per asset, HOLD/repeated BUY keeps it open, and SELL or the saved stop closes it. With limitations off, each new BUY can add a position using available cash, and new trades have no automatic stop. SELL closes every open NN position for that asset. It uses local inference; no paid AI service is needed.
+The dashboard has one neural model: the authors' published Parente 5/2. The original weights, reconstructed final-training scaler and frozen Binance volume statistics are retained. Inference is local; AI commentary connections do not supply neural trading decisions.
 
-Home displays market classifications and their BUY / HOLD / SELL probabilities independently of paper positions, balances or trade eligibility. Positions applies the classification to each manually recorded holding separately from its SMC and SMC + GEX targets. Those targets and the separate 4H protected-level monitor do not control neural paper orders.
+## Matching the trained inputs
 
-## Use it
+Parente reads Binance **spot/USDT** OHLCV on completed UTC **4H** candles. Volume is Binance's base-asset kline volume, not quote turnover, a sum across venues or derivatives volume. The live provider validates the trading symbol, exchange clock, candle boundaries, continuity and latest completed bar. It checks feed health even when a completed-candle classification is cached. Failure withholds the current signal; another venue's candles are not substituted.
 
-The project `.venv` already has the numerical dependencies installed. For another environment:
+Before execution, the reading must identify the loaded Parente artifact, the exact latest completed 4H candle and its matching Binance input contract. BUY/HOLD/SELL must agree with the maximum of finite normalized class probabilities. The accepted classification is fixed for that decision candle across cache clears and restarts; a conflicting same-candle prediction withholds neural execution. Recorded SMC stops and targets remain monitored. A neural SELL exit requires a newer completed decision candle than the entry confirmation.
 
-```powershell
-python -m pip install -r requirements-neural.txt
-```
+The model requires at least 100 consecutive completed 4H candles and frozen volume calibration for the asset. Calibration coverage is read from the validated model's `volume_stats`; BTC, ETH and SOL are default dashboard assets, not the complete calibrated list. All observations used for live inference must follow the model's calibration cutoff, 2022-12-04 15:59:59.999 UTC.
 
-Open **Settings**, adjust the NN simulation and paper account/risk fields, save, then apply changes. SMC settings tune the independent market and position analysis. There is no strategy selector: legacy, combined and SMC paper strategies are no longer launched by the application.
+Each selected Settings pair controls its SMC candles and chart through the chosen Deribit-first or Binance feed; supported GEX levels must match that exact pair and price coordinate. Parente independently maps that pair's base asset to its trained Binance/USDT market. Home, paper execution and Positions use one applied model and shared classification cache. Inputs, candle close, probabilities and model identity remain inspectable. Probabilities choose the largest of BUY/HOLD/SELL; they are not probabilities of profit.
 
-Alternatively, edit the existing settings JSON's `strategy` object:
+## Combined execution
 
-```json
-{
-  "strategy_model": "neural_network",
-  "nn_model_path": "",
-  "nn_limitations": true,
-  "nn_stop_loss": 0.10,
-  "nn_signal_max_age_seconds": 60
-}
-```
+Automatic entries require all of the following:
 
-Keep the other existing asset and strategy settings. An empty model path uses `adaptive_crypto/models/parente_5_2.npz`; a relative custom path resolves beside the settings file. `nn_stop_loss` must be greater than zero and at most 0.10; it applies to new trades only while limitations are on. The execution window is 1–300 seconds. SMC target and displayed momentum calculations use their own configured timeframes (30M/5M or 15M/1M); position protected-level alerts use a separate 4H, 2-left/2-right monitor. Neural paper stop history uses 5M candles. With limitations off and no existing positions with stops, the execution path does not wait for 5M stop history. Neural paper entries are long-only even when margin mode is selected for other workflows.
+- A current qualified Perky SMC plan produced by the published Filtered defaults.
+- Current Parente BUY on the latest completed Binance 4H candle.
+- A fresh exact-pair price from the selected dashboard feed within the plan's stop/entry/target bracket, valid clocks and current monitoring history.
+- Available paper cash and the enabled allocation/risk checks.
 
-The model needs at least 100 contiguous completed 4H candles and frozen volume calibration for the asset's base symbol. The bundled calibration includes BTC, ETH and SOL. Missing dependencies, invalid models, uncalibrated assets and stale/broken feeds appear on the dashboard. Existing stops continue to be monitored from valid quotes or completed stop-monitoring candles even when inference is unavailable.
+The Perky SMC plan fixes the recorded stop and TP1–TP3. TP1 and TP2 remain intermediate levels; TP3 is the full execution target. Completed stop-monitoring candles and current quotes continue to protect an open trade during neural outages. A stop precedes a target or neural exit on the same observation. If a completed candle touches stop and target, the stop wins because OHLC cannot establish their intrabar order. A gap below the stop uses the adverse opening price. Entry-containing candles do not retrospectively establish an exit order.
 
-## State and execution
+A TP3 hit closes the remaining quantity in full. A later eligible Parente SELL can close it before TP3. There is no TP1 partial exit. BUY uses the selected market's fresh price plus configured slippage; exits use its applicable fresh reference or monitored level minus the recorded slippage. Fees are charged on both sides using the trade's recorded rates. The Deribit index quote is a paper simulation reference, not an executable exchange order book.
 
-Home, paper trading and manual-position guidance share one loaded model and cached classification. A replaced model file takes effect for all three only after applying settings or restarting. Each scan processes NN execution for all assets before advisory SMC requests, obtains a fresh executable quote after required inputs/inference, and checks the actual execution time.
+With paper allocation limits enabled, position count, per-trade/total risk, allocation, floor, spread and minimum-order checks constrain entries. Disabling those limits allows available-cash sizing while retaining the SMC entry requirement, Parente confirmation and recorded SMC stop/target. Trades preserve their levels and costs when Settings changes. Durable setup/candle identities and transactionally stored notifications prevent repeated scans from duplicating an entry.
 
-Position NN alerts retain their last valid classification across temporary quote/model outages. Current undelivered exits can recover with a fresh quote; sent or uncertain deliveries are never replayed. These alerts remain independent of SMC targets and do not close recorded positions.
+Paper alerts identify the pair, Parente artifact and UTC decision candle separately from execution time. Entry messages show class probabilities, recorded fee rate, entry fee and slippage. Exit messages distinguish SMC stop/target exits from a new Parente SELL, and show gross P/L, entry/exit fees and net P/L. A queued entry expires with its entry evidence and is cancelled if the authoritative trade has closed or been deleted; the exit record can still be delivered.
 
-- The active neural simulation has its own cash and paper history. JSON uses a `.neural.json` sidecar; SQLite uses a `neural` namespace in the existing WAL database. Manually recorded positions remain in their separate positions store.
-- Legacy, combined and SMC paper records remain readable in Trade Records. Their open records are marked as no longer monitored. The NN-only application does not switch back to those strategies.
-- Signals use the largest of BUY/HOLD/SELL probabilities. These are model outputs, not calibrated probabilities of profit. Inputs, signal close, model identity, trade costs and accounting remain inspectable in the dashboard/API.
-- A classifier entry or exit needs a fresh executable quote observed after the 4H close and inside the execution window. A late startup displays the last classification without backfilling a trade. Missing quotes can recover within the original window. With limitations on, BUY also requires the latest completed stop-monitoring candle, acceptable spread, and sufficient cash/risk capacity.
-- BUY uses ask plus configured slippage. SELL uses bid minus recorded slippage. Both sides charge the recorded fee. With limitations on, the entry stop is fixed at `entry * (1 - nn_stop_loss)`; with limitations off, new trades have no automatic stop and exit on NN SELL. There is no fixed take-profit.
-- Completed candles wholly after entry may establish a stop. A gap below the stop uses the adverse candle open; current quotes below the stop use that bid. Stops precede classifier exits, and an observation that stops a position cannot re-enter it. The entry-containing candle cannot establish retrospective intrabar ordering.
-- With limitations on, one active position per asset and the allocation, total risk, per-trade risk, equity-floor, spread and minimum-notional settings constrain entries. With limitations off, each new 4H BUY spends all available paper cash including the entry fee, with no borrowing. The first eligible asset can use the whole balance; later entries need cash released by exits. There is no position-count limit. Open risk for a trade without a stop is its full invested cash including the entry fee.
-- The signal candle is consumed durably. Repeated scans, restarts and model changes cannot trade it twice. The trade and notification outbox commit together; failed commits publish neither. Interrupted Telegram delivery becomes uncertain and is not automatically resent.
-- Applying settings retains existing neural trade levels, costs and consumed candle identities. Switching limitations off preserves stops on existing trades; switching on does not add stops to earlier stopless trades or discard multiple positions. SELL closes all active lots for the asset in either mode. Purge and migration/export/backup support the neural namespace using the existing maintenance rules. Backups replace the single complete `backup/latest.zip` archive.
-- NN position guidance is advisory: an adverse classification shows TAKE PROFIT when the executable price is profitable relative to entry, or STOP LOSS otherwise, excluding costs. Supporting and neutral classifications show HOLD. Recorded positions stay open until you record your actual exit.
+## Manual entries and actual holdings
 
-## Research mapping and differences
+Manual paper entries can be added between 4H closes, with an explicit price or the fresh Deribit index reference. Their cash budget includes the entry fee. They retain their recorded stop policy; a later completed Parente SELL can close them under the normal manual-entry chronology. Request IDs make retries idempotent. Manual creation neither backdates an order nor closes a recorded holding.
 
-Reference: Parente, Rizzuti and Trerotola, *A profitable trading algorithm for cryptocurrencies using a Neural Network model*, Expert Systems with Applications 238 (2024), 121806. [Paper](https://doi.org/10.1016/j.eswa.2023.121806), [published source/data/model archive, version 2](https://figshare.com/articles/code/CryptoTrading_zip/22953377/2).
+Positions applies the same Parente reading to each holding alongside SMC TP1 and SMC+GEX TP2. An adverse classification or confirmed adverse SMC structure change provides protective guidance, including when the holding is profitable. Saved stops and targets change through their explicit forms. Alerts respect each position's preferences; actual holdings stay open until an exit is recorded.
 
-The network is 36 → 128 → 64 → 32 → 3, with LeakyReLU slope 0.01 and softmax. Output order follows the authors' label encoder: -1/0/1 = BUY/HOLD/SELL. The bundled weights are the authors' trained `model_final_5_2.h5` Dense arrays converted to a data-only NPZ. No TensorFlow, pickle or downloaded Python scripts execute during loading. This is the published model, not a newly trained model.
+## Published model and feature mapping
 
-The saved weights need the authors' executable feature definitions where they differ from the prose:
+Reference: Parente, Rizzuti and Trerotola, *A profitable trading algorithm for cryptocurrencies using a Neural Network model*, Expert Systems with Applications 238 (2024), 121806. [Research paper](https://doi.org/10.1016/j.eswa.2023.121806), [authors' source/model archive, version 2](https://figshare.com/articles/code/CryptoTrading_zip/22953377/2).
 
-| Component | Implemented definition from the source |
+The network is 36 → 128 → 64 → 32 → 3, with LeakyReLU slope 0.01 and softmax. The original label order -1/0/1 maps to BUY/HOLD/SELL. The data-only NPZ contains the published Dense arrays; loading executes neither TensorFlow nor downloaded research scripts.
+
+| Input group | Executable source definition |
 | --- | --- |
-| Z-score | Log returns, rolling 20-candle mean and sample standard deviation; prose describes 30 closing prices. |
-| Oscillators | RSI(14)/100; ULTOSC(7,14,28)/100; position inside BBANDS(5, 2σ); simple close percentage change. |
-| Volume | Base volume normalized by each asset's archived sample mean/std, then frozen. |
-| Four MA ratios | Relative differences of price/SMA21, SMA21/SMA50, SMA50/SMA100, price/SMA50; prose describes EMA and a 20-period average. |
-| Candlesticks | The exact 23 TA-Lib pattern functions and order from the archive, divided by 100. See `neural.FEATURES`. |
-| Time | UTC weekday, month, and hour divided by 4. |
-| Training labels | Adjusted EMA over the backward window versus the forward close; strict alpha/beta bounds, alpha 0.038. Source beta is `0.24 * (1 + forward * 0.1)`, so 0.288 for forward=2; prose's adjustment gives 0.264. Source labels omit fees. `labels(..., convention="paper")` exposes the beta discrepancy; it does not change trained weights. Unknown future tails remain NaN. |
+| Z-score | Log returns with rolling 20-candle mean and sample standard deviation. |
+| Oscillators | RSI(14)/100, ULTOSC(7,14,28)/100, BBANDS(5, 2σ) location and simple close percentage change. |
+| Volume | Archived per-asset Binance base-volume mean/sample standard deviation, frozen. |
+| MA ratios | Relative price/SMA21, SMA21/SMA50, SMA50/SMA100 and price/SMA50 differences. |
+| Candlesticks | The original 23 TA-Lib pattern functions, in their original order, divided by 100. |
+| Calendar | UTC weekday, month and hour divided by 4. |
 
-The archive does not save the StandardScaler. The importer reconstructs it from the final-training pool: drop invalid rows, exclude BTCUSDT/ETHUSDT/ALGOUSDT, retain `pct_change < .24`, and fit before balancing and the random train/test split. The final-training script deliberately includes all available dates. The reconstructed scaler has **1,533,301 rows across 407 assets**. Its population standard deviation matches StandardScaler conventions.
+The published artifact reconstructs StandardScaler on the source's final-training pool before balancing/splitting, excluding BTCUSDT/ETHUSDT/ALGOUSDT and retaining `pct_change < .24`. The published weights remain fixed. Calibration coverage for an asset is distinct from inclusion in that final-training pool. Frozen normalization, later market conditions and the SMC execution rules mean these paper results do not reproduce the paper's backtest.
 
-The authors' backtest refits normalization on evaluation data, and volume z-scores use each complete asset series. Here all normalization is frozen from the archive, so future candles cannot alter an earlier feature row. Live inference and the offline trading tool require timestamps after the last training/calibration candle: **2022-12-04 15:59:59.999 UTC**. Historical pre-cutoff data can still be used to verify feature arithmetic, without presenting it as out-of-sample trading.
+Bundled NPZ SHA-256: `8907c6f395dc8cf385619f1cace6e27c3b23a04a820fe980cde65898cad56c87`. License and conversion provenance are retained in `adaptive_crypto/models/NOTICE.md` and the companion JSON.
 
-Live Kraken/USD versus historical Binance/USDT, frozen venue-specific volume statistics, subsequent market changes, next-observation execution and portfolio limits materially change results. The implementation does not reproduce or establish the paper's reported returns.
-
-## Offline tools
-
-Inspect the bundled model:
+## Offline inspection
 
 ```powershell
 .\.venv\Scripts\python.exe -m adaptive_crypto.neural_tools inspect
 ```
 
-Reproduce conversion from the downloaded version-2 archive to a **new** output path:
+Read-only artifact inspection and standalone Parente simulation are available through `adaptive_crypto.neural_tools --help`. The simulation uses next-open chronology and does not reproduce the combined live SMC strategy. There is no model training or model replacement interface.
 
-```powershell
-.\.venv\Scripts\python.exe -m adaptive_crypto.neural_tools import-author .\.neural-work\CryptoTrading.zip --output .\reproduced_model.npz
-```
+## Position currency is independent of model currency
 
-The importer verifies archive MD5 `012f76ea14b5f95fff2b77f3c4e5441c`, reads data/weights without executing scripts, and writes the NPZ plus JSON provenance. The bundled NPZ SHA-256 is `8907c6f395dc8cf385619f1cace6e27c3b23a04a820fe980cde65898cad56c87`. Conversion needs h5py in addition to the inference dependencies.
-
-Backtest an operator-supplied single-asset CSV with `Date,Open,High,Low,Close,Volume`, contiguous UTC 4H candles and base-asset volume:
-
-```powershell
-.\.venv\Scripts\python.exe -m adaptive_crypto.neural_tools backtest .\btc_4h.csv --asset BTC --output .\btc_neural_backtest.json --fee 0.001 --slippage 0.0005 --stop-loss 0.10
-```
-
-Only feature-ready signals after calibration are eligible. Signal at t executes at t+1 open, gap stops take precedence, fees/slippage apply on both sides, and remaining positions liquidate at the final close. The single-asset simulator reinvests available capital and uses its own CLI stop/cost options; the dashboard checkbox does not change offline backtests. Its report contains trades, equity, net return, drawdown sampled at candle closes, a seeded 15/70/15 dummy baseline, and a buy-and-hold-with-stop baseline with the same costs/stop. OHLC cannot reconstruct intrabar order; this is an explicit execution model. For an intrabar stop, the report uses candle close as its confirmation timestamp (`closed_ms`, `exit_time_basis: candle_close_confirmation`) and sets `exit_time_exact` to false; it does not claim the stop filled at that precise time. Gap stops and classification exits retain the modeled candle-open timestamp, and terminal liquidation uses the final close.
-
-## Verification
-
-Historical full-suite run on 12 September 2026: **496 Python tests passed in 22.587 seconds**, including 31 neural regressions, with no skips on Python 3.12.14 / SQLite 3.53.1. All **8 Node browser-script tests** passed. Desktop and 390px browser checks showed no page overflow or JavaScript console errors. Model conversion and a 300-candle synthetic CSV backtest completed; this smoke test is not historical profitability evidence.
-
-Run all tests with the fixed project runtime:
-
-```powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s . -q
-node --test test_gex_ui.js test_nn_charts_ui.js
-```
-
-`test_neural_strategy.py` covers inference/schema rejection, causal feature prefixes, source/paper labels, execution chronology, fees/risk/accounting, failed writes and failed SQLite claims, restarts, settings/reload, purge, independent strategy namespaces and migration round trips. A fixture compares 36 measurements for three archived BTC candles: maximum absolute error **5.56e-16**. An independent per-node calculation from published H5 weights agrees with converted inference to **2.99e-7** maximum probability error.
-
-The model/data source is attributed under GPL-3.0-or-later; the archive also points to Binance terms for financial-data usage. See `adaptive_crypto/models/NOTICE.md` and the JSON provenance file. Source datasets and the large research archive are not required by the application.
+For BTC/USDC in main Settings, SMC and paper/manual positions use BTC/USDC prices, stops and targets, with quantity in BTC. Manual holding P/L is in USDC; paper cash, fees, risks and realized P/L are in USD. Parente still classifies the original Binance BTC/USDT completed four-hour candles. Only its BUY/HOLD/SELL classification confirms or exits the selected-pair plan. Model weights, feature scaling and frozen volume calibration are unchanged. Assets absent from the trained calibration can still show SMC analysis, but Parente remains unavailable rather than inventing a new calibration. DVOL has a separate Deribit-only pair list.

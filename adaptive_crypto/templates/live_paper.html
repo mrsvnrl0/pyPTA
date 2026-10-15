@@ -1,7 +1,7 @@
-<p id="position-refresh-hint" class="muted" hidden>Refresh paused while editing alert preferences.</p>
+<p id="position-refresh-hint" class="muted" hidden>Refresh paused while editing paper entries or alert preferences.</p>
 <section class="records-section" id="live-paper"><h2>Live paper trades</h2>
-<p class="muted">NN-only paper simulation. SMC analysis on Home does not place paper orders. Use <a href="{{ url_for('positions_page') }}">Positions</a> to record your actual trades.</p>
+<p class="muted">Perky SMC + Parente paper simulation, including manual paper entries. Automatic entries require a qualified Perky setup and Parente BUY; its recorded stop, TP3 or Parente SELL closes the trade. Use <a href="{{ url_for('positions_page') }}">Positions</a> to record your actual trades.</p>
 {% include 'paper_statistics.html' %}
 {% for error in records.errors %}<p class="danger">{{ error }}</p>{% endfor %}
-{% with paper_rows=records.active|selectattr("model_active")|list, paper_empty='No active paper trades. Waiting for a qualified entry.' %}{% include 'paper_trade_table.html' %}{% endwith %}
+{% with paper_rows=records.active|selectattr("model_active")|list, paper_empty='No active paper trades. Waiting for a qualified Perky SMC setup with Parente BUY, or add a paper position above.' %}{% include 'paper_trade_table.html' %}{% endwith %}
 </section>

@@ -1,0 +1,28 @@
+[Unit]
+Description=pyPTA SMC and Parente dashboard
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=pypta
+Group=pypta
+WorkingDirectory=/opt/pyPTA
+Environment=PYTHONUNBUFFERED=1
+Environment=LD_LIBRARY_PATH=/opt/pyPTA/.sqlite/lib
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=PYPTA_HTTPS_ONLY=1
+Environment=PYPTA_CREDENTIAL_KEY=/opt/pyPTA/.secrets/credentials.key
+EnvironmentFile=-/opt/pyPTA/deploy/environment
+ExecStart=/opt/pyPTA/.venv/bin/python -B /opt/pyPTA/adaptive_crypto_dashboard.py --host 127.0.0.1 --port 5000 --state-backend auto
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/opt/pyPTA
+UMask=0077
+[Install]
+WantedBy=multi-user.target

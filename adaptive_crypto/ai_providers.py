@@ -39,7 +39,7 @@ def request_json(method, url, *, label, headers=None, payload=None, timeout=25):
         raise ProviderError(f"{label} request failed. Check the connection and try again.") from None
 
 
-def ai_request(config, payload=None, *, check=False):
+def ai_request(config, payload=None, *, check=False, instructions=INSTRUCTIONS):
     try:
         provider = config["provider"]
         if provider not in PROVIDERS:
@@ -58,12 +58,38 @@ def ai_request(config, payload=None, *, check=False):
                 raise ProviderError("OpenAI returned an unexpected model response.")
             return "Credentials accepted and model found. Commentary generation has not been tested."
         body = request_json("POST", "https://api.openai.com/v1/responses", label=label, headers=headers,
-                            payload={"model": model, "store": False, "instructions": INSTRUCTIONS,
+                            payload={"model": model, "store": False, "instructions": instructions,
                                      "input": json.dumps(payload, allow_nan=False), "max_output_tokens": 1600})
         if body.get("status") != "completed":
             raise ProviderError("OpenAI did not complete the commentary.")
         parts = [part.get("text", "") for item in body.get("output", []) if item.get("type") == "message"
                  for part in item.get("content", []) if part.get("type") == "output_text"]
+    elif provider == "deepseek":
+        headers = {"Authorization": "Bearer "+key, "Content-Type": "application/json"}
+        if check:
+            body = request_json("GET", "https://api.deepseek.com/models", label=label,
+                                headers=headers, timeout=10)
+            models = body.get("data")
+            if not isinstance(models, list):
+                raise ProviderError("DeepSeek returned an unexpected model response.")
+            if not any(isinstance(item, dict) and item.get("id") == model for item in models):
+                raise ProviderError("DeepSeek did not list the selected model. Choose a model available in your account.")
+            return "Credentials accepted and model found. Commentary generation has not been tested."
+        body = request_json("POST", "https://api.deepseek.com/chat/completions", label=label,
+                            headers=headers, payload={"model": model,
+                            "messages": [{"role": "system", "content": instructions},
+                                         {"role": "user", "content": json.dumps(payload, allow_nan=False)}],
+                            "thinking": {"type": "disabled"}, "stream": False, "max_tokens": 1600})
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ProviderError("DeepSeek returned an unexpected commentary response.")
+        choice = choices[0]
+        if choice.get("finish_reason") != "stop":
+            raise ProviderError("DeepSeek did not complete the commentary; it may have been blocked or truncated.")
+        message = choice.get("message")
+        if not isinstance(message, dict) or message.get("tool_calls") or not isinstance(message.get("content"), str):
+            raise ProviderError("DeepSeek returned no completed text commentary.")
+        parts = [message["content"]]
     else:
         headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
         url = "https://generativelanguage.googleapis.com/v1beta/models/"+quote(model, safe="")
@@ -73,7 +99,7 @@ def ai_request(config, payload=None, *, check=False):
                 raise ProviderError("This Gemini model does not support commentary generation.")
             return "Credentials accepted and text model found. Commentary generation has not been tested."
         body = request_json("POST", url+":generateContent", label=label, headers=headers,
-                            payload={"systemInstruction": {"parts": [{"text": INSTRUCTIONS}]},
+                            payload={"systemInstruction": {"parts": [{"text": instructions}]},
                                      "contents": [{"role": "user", "parts": [{"text": json.dumps(payload, allow_nan=False)}]}],
                                      "generationConfig": {"maxOutputTokens": 1600}})
         candidates = body.get("candidates", [])

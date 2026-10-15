@@ -2,10 +2,10 @@
   'use strict';
 
   function effectiveState(row, now, disconnected) {
-    if (row.status !== 'ready') return row.status || 'unknown';
+    if (!['ready','partial'].includes(row.status)) return row.status || 'unknown';
     if (disconnected) return 'disconnected';
     if (!Number.isFinite(row.valid_until_ms) || now >= row.valid_until_ms) return 'stale';
-    return 'ready';
+    return row.status;
   }
   function eligibility(row, now) {
     if (row.refreshing) return 'Refresh in progress';
@@ -21,7 +21,7 @@
   if (!panel) return;
   const summary = panel.querySelector('.feed-status-summary');
   const container = panel.querySelector('.feed-status-assets');
-  const labels = {ready: 'Current', unavailable: 'Unavailable', unknown: 'Not observed',
+  const labels = {ready: 'Current', partial: 'Partial coverage', unavailable: 'Unavailable', unknown: 'Not observed',
     stale: 'Stale', unsupported: 'Unsupported', disconnected: 'Unverified'};
   let payload = null, receivedAt = 0, disconnected = false, inFlight = false;
   let views = [];
@@ -66,6 +66,18 @@
           details.append(element('summary', '', 'Previous failure'),
             element('p', '', time(row.last_failure_ms) + ' · ' + row.last_failure));
           item.append(details);
+        }
+        if (row.sources && row.sources.length) {
+          const sources = element('details', '');
+          sources.append(element('summary', '', row.key === 'gex' ? 'Options venue coverage' : 'Spot venue coverage'));
+          row.sources.forEach(source => sources.append(element('p', 'muted',
+            (row.key === 'gex' ? (source.venue || 'Deribit') + ' · ' + asset.symbol +
+              (source.settlement ? ' · settles in ' + source.settlement : '') +
+              (source.native_quote && source.quote_currency ? ' · price units ' + source.native_quote + ' → ' + source.quote_currency : '') :
+              (source.key || source.venue)) + ' · ' + source.status +
+            (source.option_count ? ' · '+source.option_count+' options' : '') +
+            (source.error ? ' · '+source.error : ''))));
+          item.append(sources);
         }
         grid.append(item);
       });

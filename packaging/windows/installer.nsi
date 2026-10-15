@@ -8,8 +8,7 @@ Unicode true
   !error "Specify /DFLAVOR=Open or /DFLAVOR=Obfuscated"
 !endif
 !define NAME "pyPTA"
-; Retain the installed identity so either edition upgrades the earlier release.
-!define KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\AdaptiveCryptoDashboard"
+!define KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\pyPTA.SMCParente"
 Name "${NAME} (${FLAVOR})"
 OutFile "..\release\pyPTA-Setup-1.0.1-${FLAVOR}-x64.exe"
 InstallDir "$LOCALAPPDATA\Programs\pyPTA"
@@ -27,7 +26,7 @@ VIAddVersionKey "CompanyName" "EternuLL Organisation"
 VIAddVersionKey "LegalCopyright" "Copyright 2026 EternuLL Organisation"
 !define MUI_ICON "dashboard.ico"
 !define MUI_UNICON "dashboard.ico"
-!define MUI_WELCOMEPAGE_TEXT "Install pyPTA (${FLAVOR}), including the neural-network model and Python runtime.$\r$\n$\r$\nExisting settings and records are retained. A new profile starts with empty trading data.$\r$\n$\r$\nRequires 64-bit Windows 10 or 11."
+!define MUI_WELCOMEPAGE_TEXT "Install pyPTA (${FLAVOR}), including the neural-network model and Python runtime.$\r$\n$\r$\nThis release uses its own SMC + Parente profile. A new profile starts with empty trading data.$\r$\n$\r$\nRequires 64-bit Windows 10 or 11."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_COMPONENTS
@@ -50,7 +49,7 @@ Function .onInit
   ${EndIf}
   SetShellVarContext current
   SetRegView 64
-  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\AdaptiveCryptoDashboard.Installed") p.r0'
+  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\pyPTA.SMCParente.Installed") p.r0'
   ${If} $0 <> 0
     System::Call 'kernel32::CloseHandle(p r0)'
     MessageBox MB_ICONEXCLAMATION "Close the pyPTA launcher before installing or updating."
@@ -62,8 +61,6 @@ Section "pyPTA and bundled runtime (required)" Main
   SectionIn RO
   SetOutPath "$INSTDIR"
   ; Known payload names only; user data is outside the installation directory.
-  Delete "$INSTDIR\AdaptiveCryptoDashboard.exe"
-  Delete "$INSTDIR\AdaptiveCryptoDashboard-Source-1.0.0.zip"
   Delete "$INSTDIR\pyPTA-Source-1.0.1.zip"
   File /r "..\dist\pyPTA-${FLAVOR}\*"
 !ifdef OPEN_SOURCE
@@ -82,11 +79,6 @@ Section "pyPTA and bundled runtime (required)" Main
   WriteRegDWORD HKCU "${KEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   WriteRegDWORD HKCU "${KEY}" "EstimatedSize" $0
-  Delete "$DESKTOP\Adaptive Crypto Dashboard.lnk"
-  Delete "$SMPROGRAMS\Adaptive Crypto Dashboard\Adaptive Crypto Dashboard.lnk"
-  Delete "$SMPROGRAMS\Adaptive Crypto Dashboard\Read me.lnk"
-  Delete "$SMPROGRAMS\Adaptive Crypto Dashboard\Uninstall.lnk"
-  RMDir "$SMPROGRAMS\Adaptive Crypto Dashboard"
   CreateDirectory "$SMPROGRAMS\${NAME}"
   CreateShortcut "$SMPROGRAMS\${NAME}\${NAME}.lnk" "$INSTDIR\pyPTA.exe"
   CreateShortcut "$SMPROGRAMS\${NAME}\Read me.lnk" "$INSTDIR\README.txt"
@@ -98,7 +90,7 @@ SectionEnd
 Function un.onInit
   SetShellVarContext current
   SetRegView 64
-  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\AdaptiveCryptoDashboard.Installed") p.r0'
+  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\pyPTA.SMCParente.Installed") p.r0'
   ${If} $0 <> 0
     System::Call 'kernel32::CloseHandle(p r0)'
     MessageBox MB_ICONEXCLAMATION "Close the pyPTA launcher before uninstalling."

@@ -2,9 +2,15 @@
 document.querySelectorAll('.gex').forEach(panel => {
   const withSMC = panel.dataset.context !== 'nn';
   const find = selector => panel.querySelector(selector);
-  const money = value => Number.isFinite(value) ? '$' + value.toLocaleString('en-US', {
-    minimumFractionDigits: Number(panel.dataset.digits), maximumFractionDigits: Number(panel.dataset.digits)
-  }) : '—';
+  const priceCurrency = () => last?.price_currency || panel.dataset.quoteCurrency || 'USD';
+  const spotSource = data => data.market_source_label || panel.dataset.marketSourceLabel || 'Deribit composite index';
+  const money = value => {
+    if (!Number.isFinite(value)) return '—';
+    const amount = value.toLocaleString('en-US', {
+      minimumFractionDigits: Number(panel.dataset.digits), maximumFractionDigits: Number(panel.dataset.digits)
+    });
+    return priceCurrency() === 'USD' ? '$' + amount : amount + ' ' + priceCurrency();
+  };
   const distance = value => Math.abs(value).toLocaleString('en-US', {maximumFractionDigits: 2}) + '%';
   let last = null, renderedState = '';
   function add(svg, tag, attrs, text) {
@@ -19,7 +25,7 @@ document.querySelectorAll('.gex').forEach(panel => {
       {price: data.call_wall?.strike, label: 'Call wall', color: '#fa8585'},
       {price: data.gamma_flip, label: 'Gamma flip', color: '#efc36b'},
       {price: data.put_wall?.strike, label: 'Put wall', color: '#63d7a1'},
-      {price: data.price ?? data.spot, label: data.price === null ? 'Deribit index' : 'Kraken spot', color: '#e2e8f0'}
+      {price: data.price ?? data.spot, label: data.price === null ? 'Options index' : spotSource(data), color: '#e2e8f0'}
     ].filter(item => Number.isFinite(item.price));
     const matched = data.target_confluence?.matches || [];
     const pois = [...(data.pois || [])].sort((a,b) => {
@@ -31,7 +37,7 @@ document.querySelectorAll('.gex').forEach(panel => {
     let low = Math.min(...values), high = Math.max(...values);
     const pad = Math.max((high-low)*.12, high*.003); low -= pad; high += pad;
     const y = price => 286-(price-low)/(high-low)*256;
-    add(svg, 'title', {}, withSMC ? 'Price-scaled Naive GEX levels and SMC order blocks' : 'Price-scaled Naive GEX levels and net exposure by strike');
+    add(svg, 'title', {}, withSMC ? 'Price-scaled Deribit GEX levels and SMC order blocks' : 'Price-scaled Deribit GEX levels and net exposure by strike');
     for (let i = 0; i <= 4; i++) {
       const price = low+(high-low)*i/4;
       add(svg, 'line', {x1:104, x2:402, y1:y(price), y2:y(price), stroke:'#303947'});
@@ -110,31 +116,55 @@ document.querySelectorAll('.gex').forEach(panel => {
   }
   function render(data) {
     const ready = data.status === 'ready';
-    find('.gex-status').textContent = ready ? 'Options current' : data.status.toUpperCase();
+    find('.gex-status').textContent = ready ? 'Options current' : data.status === 'partial' ? 'Partial coverage' : data.status.toUpperCase();
     panel.classList.toggle('gex-stale', !ready);
     find('.gex-content').hidden = !data.strikes;
     find('.gex-error').textContent = data.error || '';
-    find('.gex-meta').textContent = data.market ? data.market+' · '+data.option_count+' OI-bearing options · '+new Date(data.asof_ms).toLocaleString()+(data.quote_currency === 'USDC' ? ' · USDC ≈ USD' : '') : 'Deribit options · positioning proxy';
+    const selectedPair = data.symbol || panel.dataset.symbol;
+    find('.gex-meta').textContent = data.market ? selectedPair+' · '+data.market+' · '+data.option_count+' OI-bearing options · '+new Date(data.asof_ms).toLocaleString()+' · prices '+priceCurrency()+' · exposure '+(data.exposure_currency || data.quote_currency || 'USD') : selectedPair+' · Deribit options · signed open-interest gamma proxy';
+    const pairContext = find('.gex-pair-context');
+    if (pairContext) pairContext.textContent = 'Selected pair: '+selectedPair+'. The rows show each option market\'s settlement currency. All prices and GEX are expressed in '+priceCurrency()+'.';
+    const pricing = find('.gex-pricing');
+    if (pricing) pricing.textContent = data.pricing_model === 'forward-basis-spot-delta-v2' ?
+      'Forward prices used for '+data.forward_priced_count+' of '+data.option_count+' options · ACT/365.'+
+      '' :
+      '';
+    const sources = find('.gex-sources');
+    if (sources) {
+      sources.replaceChildren();
+      (data.sources || []).forEach(source => {
+        const item = document.createElement('li');
+        const convertedQuote = source.quote_currency || priceCurrency();
+        item.textContent = (source.venue || 'Deribit')+' · '+(data.base || panel.dataset.asset)+' options'+
+          (source.settlement ? ' · settles in '+source.settlement : '')+' · '+
+          ({ready:'included',not_listed:'not listed',no_open_interest:'no open interest',unavailable:'unavailable'}[source.status] || source.status) +
+          (source.option_count ? ' · '+source.option_count+' OI-bearing options' : '') +
+          (Number.isFinite(source.asof_ms) ? ' · '+new Date(source.asof_ms).toLocaleString() : '') +
+          (Number.isFinite(source.conversion_factor) && source.native_quote ? ' · price conversion '+source.native_quote+' → '+convertedQuote+' × '+source.conversion_factor.toFixed(6) : '') +
+          (source.error ? ' · '+source.error : '');
+        sources.append(item);
+      });
+    }
     if (!data.strikes) return;
     for (const level of data.levels || []) {
       find('[data-level="'+level.key+'"]').textContent = level.key === 'flip' && level.price === null ? 'No flip in ±30%' : money(level.price);
       find('[data-distance="'+level.key+'"]').textContent = level.price === null ? 'No modeled level' :
-        !ready ? 'Historical level' : level.distance_percent === null ? 'Waiting for Kraken price' :
-        level.relation === 'at' ? 'At Kraken price' : distance(level.distance_percent)+' '+level.relation+' Kraken price';
+        !ready ? (data.status === 'partial' ? 'Partial coverage · context only' : 'Historical level') : level.distance_percent === null ? 'Waiting for '+spotSource(data)+' price' :
+        level.relation === 'at' ? 'At '+spotSource(data)+' price' : distance(level.distance_percent)+' '+level.relation+' '+spotSource(data)+' price';
     }
     const net = new Intl.NumberFormat('en-US', {notation:'compact', maximumFractionDigits:2}).format(data.net_gex);
-    find('.gex-regime').textContent = (ready ? 'Modeled ' : 'Last recorded ')+data.regime+' gamma · '+net+' '+data.quote_currency+' delta / 1% move at index '+money(data.spot)+'. '+
-      (ready ? (data.regime === 'positive' ? 'Potential volatility damping.' : data.regime === 'negative' ? 'Potential volatility amplification.' : 'Balanced modeled exposure.') : 'Stale levels are historical context.')+
+    find('.gex-regime').textContent = (ready ? 'Modeled ' : data.status === 'partial' ? 'Partial-coverage ' : 'Last recorded ')+data.regime+' gamma · '+net+' '+(data.exposure_currency || data.quote_currency || 'USD')+' delta / 1% move at index '+money(data.spot)+'. '+
+      (ready ? (data.regime === 'positive' ? 'Potential volatility damping.' : data.regime === 'negative' ? 'Potential volatility amplification.' : 'Balanced modeled exposure.') : data.status === 'partial' ? 'Incomplete venue coverage; target selection disabled.' : 'Stale levels are historical context.')+
       (data.flip_candidates.length > 1 ? ' '+data.flip_candidates.length+' flips detected; nearest shown.' : '');
     find('.gex-basis').textContent = Number.isFinite(data.basis_percent) ?
-      'Deribit index is '+distance(data.basis_percent)+' '+(data.basis_percent >= 0 ? 'above' : 'below')+' Kraken spot. Levels retain their original venue prices.' : '';
+      'Options index is '+distance(data.basis_percent)+' '+(data.basis_percent >= 0 ? 'above' : 'below')+' '+spotSource(data)+'. Levels use '+priceCurrency()+'.' : '';
     const notes = withSMC ? [...(data.zone_errors || [])] : [];
     if (withSMC && !data.smc_fresh) notes.push('Waiting for fresh SMC data; order-block confluence is unavailable.');
     else if (withSMC) {
-      if (!data.zones.length && !notes.length) notes.push('No current HTF order block to map.');
+      if (!data.zones.length && !notes.length) notes.push('No current SMC Engine order block to map.');
       data.zones.forEach(z => notes.push(z.label+' '+money(z.low)+'–'+money(z.high)+' · '+
         (z.relation === 'inside' ? 'price inside block' : distance(z.distance_percent)+' '+z.relation+' price')+' · '+
-        (z.reference_only ? 'reference only; missed, retired or awaiting history' : z.confluence ? 'wall confluence' : ready ? 'no matching wall inside block' : 'confluence unavailable')+'.'));
+        (z.reference_only ? 'reference only; mitigated or retired' : z.confluence ? 'wall confluence' : ready ? 'no matching wall inside block' : 'confluence unavailable')+'.'));
     }
     if (ready && data.price !== null) {
       if (data.call_wall) notes.push(data.call_wall.strike > data.price ? (data.regime === 'positive' ? 'Call wall above price: potential ceiling in positive gamma.' : 'Call wall above price: context only; breakout amplification is possible.') : 'Call wall at/below price: no overhead ceiling.');
@@ -147,9 +177,9 @@ document.querySelectorAll('.gex').forEach(panel => {
       const confluence = data.target_confluence || {};
       const matches = confluence.ready ? confluence.matches || [] : [];
       find('.gex-target-policy').textContent = confluence.enabled
-        ? 'Target selection enabled · alignment within '+confluence.alignment_bps+' bps. '+(confluence.ready
-          ? 'Nearest eligible aligned liquidity target is preferred; the sweep buffer is then applied.' : confluence.reason || 'Waiting for fresh GEX/SMC analysis; SMC fallback applies.')
-        : 'GEX target selection is disabled in settings.';
+        ? 'Legacy position confluence enabled · alignment within '+confluence.alignment_bps+' bps. '+(confluence.ready
+          ? 'GEX matches are context for existing-position guidance; Perky TP1–TP3 stay unchanged.' : confluence.reason || 'Waiting for fresh GEX/SMC context.')
+        : 'Legacy SMC + GEX position confluence is disabled in settings.';
       find('.gex-poi-rows').replaceChildren(...[
         ['call', 'Call wall', 'Buy-side liquidity / premium order block'],
         ['put', 'Put wall', 'Sell-side liquidity / discount order block'],
@@ -173,11 +203,13 @@ document.querySelectorAll('.gex').forEach(panel => {
   function renderCurrent(force = false) {
     if (!last) return;
     const now = Date.now();
-    const optionsFresh = last.status === 'ready' && now < last.options_valid_until_ms && now >= last.asof_ms-2000;
+    const conversionFresh = !last.price_conversion || now < last.price_conversion.valid_until_ms;
+    const observationFresh = ['ready','partial'].includes(last.status) && conversionFresh && now < last.options_valid_until_ms && now >= last.asof_ms-2000;
+    const optionsFresh = last.status === 'ready' && observationFresh;
     const priceFresh = Number.isFinite(last.price) && now < last.price_valid_until_ms;
     const smcFresh = withSMC && last.smc_fresh && priceFresh && now < last.smc_valid_until_ms;
     const targetFresh = optionsFresh && smcFresh && last.target_confluence?.ready && now < last.target_confluence.valid_until_ms;
-    const state = optionsFresh+':'+priceFresh+':'+smcFresh+':'+targetFresh;
+    const state = observationFresh+':'+optionsFresh+':'+priceFresh+':'+smcFresh+':'+targetFresh;
     if (!force && renderedState === state) return;
     renderedState = state;
     const data = {...last, zones:smcFresh ? last.zones.map(z => ({...z, confluence:optionsFresh && z.confluence})) : [],
@@ -186,7 +218,7 @@ document.querySelectorAll('.gex').forEach(panel => {
         matches:targetFresh ? last.target_confluence.matches : []},
       basis_percent:optionsFresh && priceFresh ? last.basis_percent : null,
       levels:(last.levels || []).map(level => ({...level, distance_percent:optionsFresh && priceFresh ? level.distance_percent : null}))};
-    if (!optionsFresh && data.status === 'ready') Object.assign(data, {status:'stale', stale:true,
+    if (!observationFresh && ['ready','partial'].includes(data.status)) Object.assign(data, {status:'stale', stale:true,
       error:'Options snapshot expired; waiting for a successful refresh.'});
     render(data);
   }

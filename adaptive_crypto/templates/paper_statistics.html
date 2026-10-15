@@ -1,6 +1,6 @@
-<p class="muted">Paper account statistics · {{ s.rules.strategy_model|replace('_',' ')|capitalize }}</p>
+<p class="muted">Paper account statistics · USD · SMC Engine + Parente 5/2</p>
 <div class="metrics paper-statistics">
-{% for label, value in [('Paper equity at cost',money(s.portfolio.cost_equity)),('Available paper cash',money(s.portfolio.cash)),('Open paper risk',money(s.portfolio.open_risk)),('Realized paper P/L',money(s.portfolio.realized_pnl)),('Active paper positions',s.portfolio.active_positions)] %}
+{% for label, value in [('Paper equity at cost',account_money(s.portfolio.cost_equity)),('Available paper cash',account_money(s.portfolio.cash)),('Open paper risk',account_money(s.portfolio.open_risk)),('Realized paper P/L',account_money(s.portfolio.realized_pnl)),('Active paper positions',s.portfolio.active_positions)] %}
 <div class="metric"><small>{{ label }}</small><strong>{{ value }}</strong></div>{% endfor %}
 </div>
 {% if s.is_neural %}<p class="muted">Open paper risk uses recorded stops; positions without a stop count their full invested cash, including entry fees.</p>{% endif %}

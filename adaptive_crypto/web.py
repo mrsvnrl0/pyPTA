@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 import copy
+import os
 import secrets
 import time
 import uuid
 from flask import Flask, jsonify, render_template, request, session, redirect, url_for, g
 from .core import H4, DataError, Rules, finite, utc, safe_error
 from .market_data import LiveCharts
-from .gex import NaiveGEX, map_smc
-from .administration import apply_settings, purge_database, save_model_selection
+from .gex import DeribitGEX, map_smc
+from .administration import apply_settings, purge_database
 from .settings_editor import read_editor, field_groups, save_editor, check_restart
 from .trade_records import paper_records
 from .position_options import cancel_disabled_paper_alerts
-from .neural_models import model_catalog, public_report, candidate_bundle_path
 
 
 def number(value, places=3):
@@ -38,11 +38,22 @@ def measurement(value):
     return str(value)
 
 
-def money(value, places=2):
+def money(value, places=2, currency=None):
     text = number(value, places)
     if text == "—":
         return text
+    currency = currency or "USD"
+    if currency != "USD":
+        return text + " " + currency
     return f"-${text[1:]}" if text.startswith("-") else f"${text}"
+
+
+def pnl_money(value, currency, places=2):
+    fiat_and_stable = {"USD", "USDC", "USDT", "USDE", "FDUSD", "DAI", "TUSD", "BUSD", "USDP",
+                       "PYUSD", "GUSD", "USD1", "EUR", "EURI", "AEUR", "GBP", "JPY", "AUD", "BRL",
+                       "TRY", "CHF", "CAD", "NZD", "ZAR", "CNY", "CNH", "HKD", "SGD", "RUB",
+                       "UAH", "PLN", "RON", "ARS", "MXN", "IDR", "INR", "NGN", "VND", "KRW"}
+    return money(value, places if currency in fiat_and_stable else max(8, places), currency)
 
 
 def exact_measurement(value):
@@ -58,7 +69,7 @@ def multiple(value):
     return text if text == "—" else f"{text}×"
 
 
-def measurement_rows(evidence, required=False, places=3):
+def measurement_rows(evidence, required=False, places=3, currency=None):
     """Display-only labels and units; persisted evidence and comparisons stay raw."""
     value = evidence.get("required" if required else "measured")
     key = evidence.get("key", "")
@@ -97,12 +108,12 @@ def measurement_rows(evidence, required=False, places=3):
             return measurement(item)
         if isinstance(item, str):
             return {"context only": "Context only", "positive width": "Upper bound > lower bound",
-                    "> 0 and > signal": "> 0% and > ROC signal", "> 0": "> " + money(0, places)}.get(item, item)
+                    "> 0 and > signal": "> 0% and > ROC signal", "> 0": "> " + money(0, places, currency)}.get(item, item)
         if kind in {"price_range", "rsi_range"} and isinstance(item, (list, tuple)) and len(item) == 2:
             unit = "price" if kind == "price_range" else "number"
             return f"{formatted(item[0], unit)} – {formatted(item[1], unit)}" + (" (inclusive)" if kind == "rsi_range" else "")
         if kind == "price":
-            return money(item, places)
+            return money(item, places, currency)
         if kind == "timestamp":
             return utc(item)
         if kind == "multiple":
@@ -161,20 +172,28 @@ def measurement_rows(evidence, required=False, places=3):
 
 def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback=None):
     app = Flask(__name__)
+    if os.environ.get("PYPTA_HTTPS_ONLY") == "1":
+        app.config.update(SESSION_COOKIE_SECURE=True, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
     app.secret_key = secrets.token_hex(32)
+    @app.context_processor
+    def market_units():
+        return {"quote_currency": "USD", "account_currency": "USD",
+                "market_source_label": "Binance spot" if runtime.rules.market_data_source == "binance" else
+                    "Deribit first; Binance spot when the pair is unsupported", "money": money,
+                "account_money": money, "pnl_money": pnl_money}
     app.config.update(MAX_CONTENT_LENGTH=65536, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
     def chart_fallback(name):
         with runtime.lock:
             return copy.deepcopy(runtime.chart_fallback.get(name))
-    charts = LiveCharts(runtime.assets, provider=chart_provider, fallback=chart_fallback, interval=H4)
+    charts = LiveCharts(runtime.assets, provider=chart_provider if chart_provider is not None else runtime.provider, fallback=chart_fallback, interval=H4)
     chart_generation = runtime.generation
     if gex_provider is not None:
-        runtime.gex = NaiveGEX(runtime.assets, provider=gex_provider)
+        runtime.gex = DeribitGEX(runtime.assets, provider=gex_provider)
     @app.before_request
     def coordinate_mutations():
         if request.method == "POST" and runtime.stop.is_set():
             return jsonify({"error": "Dashboard is restarting. Wait for it to return."}), 503
-        if request.method == "POST" and request.endpoint not in {"apply_strategy_settings", "purge_strategy_database", "restart_dashboard", "update_position_alerts", "update_paper_alerts", "confirm_backup_restore"}:
+        if request.method == "POST" and request.endpoint not in {"apply_strategy_settings", "purge_strategy_database", "restart_dashboard", "update_position_alerts", "update_paper_alerts", "confirm_backup_restore", "open_manual_paper_position", "delete_paper_position", "refresh_pine_targets"}:
             g.activity = runtime.activity_gate.activity()
             g.activity.__enter__()
             if runtime.stop.is_set():
@@ -191,6 +210,33 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
         with runtime.lock:
             return render_dashboard("market_dashboard.html")
 
+    @app.get("/smc-chart")
+    def pine_chart_page():
+        with runtime.lock:
+            return render_dashboard("pine_chart.html")
+
+    @app.get("/api/smc-chart/<name>")
+    def pine_chart_data(name):
+        if name not in runtime.assets:
+            return jsonify({"error": "Unknown asset"}), 404
+        with runtime.lock:
+            data = copy.deepcopy(runtime.pine_charts.get(name, {}))
+        if not data:
+            data = {"asset": name, "symbol": runtime.assets[name]["symbol"], "candles": [],
+                    "structure": {"status": "unavailable"}, "expires_ms": 0,
+                    "error": "Waiting for the first Perky SMC scan"}
+        response = jsonify(data)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/smc-script")
+    def pine_source_download():
+        from flask import send_file
+        from pathlib import Path
+        return send_file(Path(__file__).resolve().parent.parent/"scripts"/"pine"/"perky_smc_ultimate_v5.pine",
+                         mimetype="text/plain", as_attachment=True,
+                         download_name="perky_smc_ultimate_v5.pine")
+
     @app.get("/paper-trading")
     def paper_page():
         with runtime.lock:
@@ -199,7 +245,13 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
     @app.get("/positions")
     def positions_page():
         with runtime.lock:
-            return render_dashboard("positions_page.html")
+            plan = None
+            asset, plan_id = request.args.get("plan_asset"), request.args.get("plan_id")
+            market = runtime.market.get(asset, {})
+            candidate = market.get("suggestion")
+            if candidate and str(candidate.get("id", candidate.get("key"))) == plan_id and market.get("guide", {}).get("expires_ms",0) > int(time.time()*1000):
+                plan = {**copy.deepcopy(candidate), "asset": asset}
+            return render_dashboard("positions_page.html", prefill_plan=plan)
 
     @app.get("/trade-records")
     def trade_records_page():
@@ -215,23 +267,10 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
             document, revision = read_editor(runtime)
             return render_template("settings.html", s=runtime.snapshot(), document=document,
                                    revision=revision, groups=field_groups(document), time=utc,
-                                   model_catalog=model_catalog(runtime.settings_path,
-                                                               (Rules(**document["strategy"]), runtime.rules)),
+                                   active_assets=runtime.assets,
                                    applied_model_id=runtime.rules.nn_model_id,
                                    csrf_token=session.setdefault("csrf_token", secrets.token_hex(32)),
                                    restart_available=restart_callback is not None)
-
-    @app.get("/api/models/<model_id>/report")
-    def candidate_model_report(model_id):
-        try:
-            document, _ = read_editor(runtime)
-            for rules in (Rules(**document["strategy"]), runtime.rules):
-                if rules.nn_model_id == model_id and rules.nn_model_bundle_path:
-                    path = candidate_bundle_path(model_id, runtime.settings_path, rules.nn_model_bundle_path)
-                    return jsonify(public_report(model_id, path))
-            return jsonify(public_report(model_id))
-        except (DataError, OSError, ValueError, TypeError):
-            return jsonify({"error": "Validated candidate report is unavailable"}), 404
 
     @app.post("/api/settings/save")
     def save_settings():
@@ -269,11 +308,13 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
             session["generation"] = runtime.generation
             session["csrf_token"] = secrets.token_hex(32)
         csrf = session.setdefault("csrf_token", secrets.token_hex(32))
-        return render_template(template or ("neural_dashboard.html" if runtime.is_neural else "dashboard.html"), s=runtime.snapshot(), refresh=runtime.refresh,
-                                      num=number, measure=measurement, time=utc, money=money,
+        return render_template(template or "neural_dashboard.html", s=runtime.snapshot(), refresh=runtime.refresh,
+                                      num=number, measure=measurement, time=utc, money=money, account_money=money,
+                                      pnl_money=pnl_money,
                                       multiple=multiple, measurement_rows=measurement_rows, exact_measurement=exact_measurement,
                                       now=int(time.time()*1000), digits={n: c["price_decimals"] for n, c in runtime.assets.items()},
-                                      assets=runtime.assets, generation=runtime.generation, csrf_token=csrf, position_request_id=uuid.uuid4().hex, **context)
+                                      assets=runtime.assets, generation=runtime.generation, csrf_token=csrf,
+                                      position_request_id=uuid.uuid4().hex, paper_request_id=uuid.uuid4().hex, **context)
     def position_payload(required, optional=()):
         payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
         if not isinstance(payload, dict):
@@ -287,6 +328,8 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
             raise DataError("Missing or unexpected position fields")
         return payload
 
+    from .dvol import register_dvol_routes
+    register_dvol_routes(app, runtime, render_dashboard, position_payload)
     from .restore import register_restore_routes
     register_restore_routes(app, runtime, position_payload)
     from .deribit_settings import register_deribit_routes
@@ -295,6 +338,8 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
     register_connection_routes(app, runtime, position_payload)
     from .market_brief import register_market_brief_routes
     register_market_brief_routes(app, runtime, position_payload)
+    from .manual_paper import register_manual_paper_routes
+    register_manual_paper_routes(app, runtime, position_payload)
 
     def position_response(position, status=200):
         if request.is_json or request.accept_mimetypes.best == "application/json":
@@ -318,19 +363,6 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
     @app.post("/api/settings/apply")
     def apply_strategy_settings():
         return administration_response(apply_settings, set())
-
-    @app.post("/api/settings/model")
-    def select_strategy_model():
-        try:
-            body = position_payload({"strategy_model"})
-            result = save_model_selection(runtime, body["strategy_model"])
-            session["model_selection_message"] = result["message"]
-            session["model_selection"] = body["strategy_model"]
-            if request.is_json or request.accept_mimetypes.best == "application/json":
-                return jsonify(result)
-            return redirect(url_for("settings_page")+"#model-settings", code=303)
-        except (DataError, ValueError, TypeError, OSError) as exc:
-            return jsonify({"error": safe_error(exc)}), 400
 
     @app.post("/api/database/purge")
     def purge_strategy_database():
@@ -374,6 +406,59 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
             return redirect(url_for("positions_page"), code=303)
         except (DataError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.post("/api/positions/<position_id>/smc-targets")
+    def refresh_pine_targets(position_id):
+        try:
+            position_payload(set())
+            with runtime.activity_gate.maintenance(), runtime.lock:
+                now_ms = int(time.time()*1000)
+                from .gex_targets import select_target, rules_for_target
+                from .position_guidance import _target
+                from .take_profit_alerts import fresh_quote
+                def update(document):
+                    position = next((p for p in document["positions"] if p["id"] == position_id), None)
+                    if position is None:
+                        raise KeyError(position_id)
+                    if position["status"] != "open":
+                        raise DataError("Only an open position can refresh its targets")
+                    row = runtime.market.get(position["asset"], {})
+                    context = row.get("gex_context", {})
+                    quote = fresh_quote(row.get("quote"), now_ms)
+                    if (context.get("source") != "pine_smc" or not quote
+                            or now_ms >= quote["asof_ms"]+30000
+                            or now_ms >= row.get("guide", {}).get("expires_ms", 0)):
+                        raise DataError("Wait for current SMC Engine structure and a fresh quote")
+                    # Re-evaluate evidence at the click time. Pine liquidity stays
+                    # usable when GEX expires, but expired GEX cannot support TP2.
+                    context = copy.deepcopy(context)
+                    if context.get("ready") and now_ms >= context.get("valid_until_ms", 0):
+                        context.update(ready=False, matches=[], reason="GEX evidence expired; refresh the market scan")
+                    context["selected_ms"] = now_ms
+                    selected_ms = now_ms
+                    long = position["side"] == "long"
+                    reference = max(position["entry"], quote["ask"]) if long else min(position["entry"], quote["bid"])
+                    first = select_target([], [], rules_for_target(runtime.rules, "smc"), position["side"], reference, selected_ms, context)
+                    if first is None:
+                        raise DataError("No current untaken SMC liquidity is available beyond this position")
+                    second = select_target([], [], rules_for_target(runtime.rules, "gex_smc"), position["side"], first["price"], selected_ms, context,
+                                           exit_reference=position["entry"])
+                    targets = {"smc": _target(first, runtime.rules, position["side"], now_ms), "gex_smc": None}
+                    if second and second["target_selection"]["method"] == "gex_smc":
+                        targets["gex_smc"] = _target(second, runtime.rules, position["side"], now_ms)
+                    position["position_targets"] = targets
+                    position["alert_revision"] = uuid.uuid4().hex
+                    for event in document["outbox"]:
+                        if position_id in event.get("position_ids",[]) and event.get("alert_type") in {"near_take_profit", "target_reached"} and event["status"] == "queued":
+                            event.update(status="cancelled",retired=True,error="Targets refreshed from SMC Engine")
+                    return position
+                position = runtime.positions.transaction(update)
+                runtime.wake.set()
+            return position_response(position)
+        except KeyError:
+            return jsonify({"error":"Position not found"}),404
+        except (DataError,TypeError,ValueError) as exc:
+            return jsonify({"error":safe_error(exc)}),400
 
     @app.post("/api/positions/<position_id>/stop")
     def update_position_stop(position_id):
@@ -451,7 +536,7 @@ def create_app(runtime, chart_provider=None, gex_provider=None, restart_callback
         nonlocal charts, chart_generation
         with runtime.lock:
             if chart_generation != runtime.generation:
-                charts = LiveCharts(runtime.assets, provider=chart_provider, fallback=chart_fallback, interval=H4)
+                charts = LiveCharts(runtime.assets, provider=chart_provider if chart_provider is not None else runtime.provider, fallback=chart_fallback, interval=H4)
                 chart_generation = runtime.generation
             current_charts = charts
         try:

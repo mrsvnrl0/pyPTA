@@ -8,7 +8,7 @@
     "HOLD",
     "SELL"
   ],
-  "description": "Authors' published 5/2 weights; reconstructed final-training scaler; frozen historical Binance base-volume statistics. Live Kraken/USD is a venue and currency transfer.",
+  "description": "Authors' published Parente 5/2 weights, reconstructed final-training scaler and frozen Binance base-volume calibration. Live input uses Binance spot/USDT completed 4H candles.",
   "excluded_assets": [
     "BTC",
     "ETH",

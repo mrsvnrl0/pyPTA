@@ -10,6 +10,7 @@
     try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password ? url.href : null; } catch (_) { return null; }
   }
   function stamp(value) { return new Date(value).toISOString().replace('T',' ').slice(0,19)+' UTC'; }
+  function providerName(provider) { return provider === 'gemini' ? 'Gemini' : provider === 'deepseek' ? 'DeepSeek' : 'OpenAI'; }
   function suggestions(html) {
     // Isolate the provider's search widget styles. Never attach scripts, event
     // handlers, frames or active URLs from returned HTML to the application.
@@ -57,11 +58,16 @@
   function render() {
     if (!latest) return;
     const brief=latest.brief, stale=brief && Date.now()-brief.asof_ms>=latest.refresh_seconds*1000;
+    const provider=brief?.provider || latest.provider;
+    panel.querySelector('[data-brief-badge]').textContent='AI · news & public posts';
+    panel.querySelector('[data-brief-coverage]').textContent=provider
+      ? 'News and public posts are researched with '+providerName(provider)+' native search every 15 minutes. Searches use your provider quota; coverage may be delayed or incomplete.'
+      : 'News and public posts are researched every 15 minutes with native provider search. Searches use your provider quota; coverage may be delayed or incomplete.';
     panel.dataset.state=stale?'stale':latest.state;
     status.dataset.problem=localError || latest.error || stale ? '1':'0';
     status.textContent=localError || latest.error || (latest.state==='off'?'Enable an AI connection in Settings to get market summaries.':
       latest.state==='updating'?'Researching current news and public posts…':
-      stale?'Previous summary · waiting for the next update.':brief?'News and public posts checked with '+(brief.provider==='gemini'?'Gemini':'OpenAI')+'.':
+      stale?'Previous summary · waiting for the next update.':brief?'Web-researched commentary by '+providerName(brief.provider)+'.':
       'Waiting for fresh market prices and the next scheduled summary.');
     time.textContent=brief?'As of '+stamp(brief.asof_ms)+' · every 15 min':'Updates every 15 minutes';
     refresh.disabled=sending || !latest.editable || !latest.can_refresh || latest.state==='off';
