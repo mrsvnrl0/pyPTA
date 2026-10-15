@@ -65,6 +65,34 @@ def validate_documents(documents, contexts):
         raise DataError(f"Invalid saved database state: {exc}") from exc
 
 
+def _migrate_saved_strategy_settings(documents, contexts):
+    """Remove strategy fields no longer supported by this version from saved SQLite state."""
+    from dataclasses import asdict
+    from .core import Rules
+
+    document = documents.get("neural")
+    context = contexts.get("neural")
+    if not isinstance(document, dict) or not isinstance(context, dict):
+        return False
+
+    supported = Rules.__dataclass_fields__.keys()
+    changed = False
+    for owner, key in ((document, "settings"), (context, "rules")):
+        saved = owner.get(key)
+        if not isinstance(saved, dict) or not all(isinstance(name, str) for name in saved):
+            continue
+        current = asdict(Rules(**{name: value for name, value in saved.items() if name in supported}).validate())
+        if current != saved:
+            owner[key] = current
+            changed = True
+
+    if changed and isinstance(document.get("warnings"), list):
+        warning = "Saved strategy settings were migrated to the current schema; recorded paper history was preserved."
+        if warning not in document["warnings"]:
+            document["warnings"].append(warning)
+    return changed
+
+
 @contextmanager
 def open_stores(base, assets, rules, backend="auto", *, settings_path=None):
     from .positions import PositionStore, prepare_positions
@@ -85,7 +113,12 @@ def open_stores(base, assets, rules, backend="auto", *, settings_path=None):
                                       "positions": {"market_mode": rules.market_mode}})
             db = stack.enter_context(SQLiteDatabase(paths.database, owned=True))
             existing = db.documents()
-            validate_documents(existing, db.information()["contexts"])
+            contexts = db.information()["contexts"]
+            if _migrate_saved_strategy_settings(existing, contexts):
+                from .backups import create_backup
+                create_backup(base, settings=settings_path, database=db, action="strategy-settings-migration")
+                db.replace_documents(existing, contexts)
+            validate_documents(existing, contexts)
             for namespace in ("neural", "positions"):
                 if namespace not in existing and paths.sources[namespace].exists():
                     raise DataError(f"Import the missing {namespace} namespace explicitly with matching settings")
